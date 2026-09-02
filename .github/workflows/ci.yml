@@ -29,6 +29,8 @@ jobs:
           key: puppeteer-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
       - run: npm ci
       - run: npm run check
+      - name: Pipeline script contract test (stubbed gh, no network)
+        run: bash tests/scripts/upsert-issue.test.sh
       - name: Extension self-test (fixture page, no account)
         timeout-minutes: 5
         run: npm run probe:selftest
