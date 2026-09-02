@@ -24,20 +24,45 @@ export interface AttachOptions {
 /**
  * A page binding can only be added once per Page; a second `exposeFunction` with the same
  * name rejects. Tracking by Page (not by URL) survives navigations, which keep the Page.
+ * The value is the id of the init script, so a rebuilt bundle can replace the old one
+ * instead of stacking a second copy on the next document.
  */
-const attached = new WeakSet<Page>();
+const attached = new WeakMap<Page, string>();
 
 export async function attachKibitz(page: Page, options: AttachOptions): Promise<void> {
   if (attached.has(page)) return;
-  attached.add(page);
   try {
     await page.exposeFunction(DESKTOP_CALL_BINDING, options.onRequest);
-    await page.evaluateOnNewDocument(options.bundle);
+    const script = await page.evaluateOnNewDocument(options.bundle);
+    attached.set(page, script.identifier);
     if (page.url() !== "about:blank") await page.evaluate(options.bundle);
   } catch (err) {
     attached.delete(page);
     throw err;
   }
+}
+
+/**
+ * Replaces the bundle registered for future documents.
+ *
+ * Why this exists: the companion reads dist/desktop-renderer.js once, at start, and
+ * `evaluateOnNewDocument` captured that text — so after `npm run build` the running Discord
+ * keeps executing the OLD renderer, and even Ctrl+R re-runs the old copy. That cost the
+ * owner a whole feature: image support looked broken for hours because the injected code
+ * predated it (AGENTS.md §12, 2026-09-02). Now `runCompanion` watches the file and calls
+ * this, so a reload picks up the new build.
+ *
+ * Only the init script is swapped; the live document keeps the old code until it reloads
+ * (evaluating a second copy into the same document would fight the `DESKTOP_MARKER` guard),
+ * which is why the caller tells the user to press Ctrl+R.
+ */
+export async function replaceBundle(page: Page, bundle: string): Promise<boolean> {
+  const previous = attached.get(page);
+  if (previous === undefined) return false;
+  await page.removeScriptToEvaluateOnNewDocument(previous);
+  const script = await page.evaluateOnNewDocument(bundle);
+  attached.set(page, script.identifier);
+  return true;
 }
 
 /**

@@ -145,7 +145,7 @@ async function start(opts: StartOptions): Promise<void> {
   const settings = await loadFileSettings(opts.settingsPath);
   log.info(`settings: ${opts.settingsPath} — ${settings === null ? "NOT configured (run `npm run desktop -- setup`)" : `${settings.provider} / ${settings.model}`}`);
   const port = await ensureDiscordListening(opts);
-  await runCompanion({ port, bundle, settingsPath: opts.settingsPath });
+  await runCompanion({ port, bundle, bundlePath: opts.bundlePath, settingsPath: opts.settingsPath });
 }
 
 const COMMANDS: Record<string, (opts: StartOptions) => Promise<void>> = {

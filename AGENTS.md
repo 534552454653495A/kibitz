@@ -619,3 +619,17 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   `source:{type:"base64"}` (Anthropic); the companion can fetch them freely, while the
   extension would need a host permission for `media.discordapp.net` or a fetch performed in
   the page — which is why it was not built on speculation.
+- **2026-09-02 — Image support looked broken for hours because the injected renderer was
+  four hours old.** The companion reads `dist/desktop-renderer.js` **once**, at start, and
+  `evaluateOnNewDocument` captures that text — so after `npm run build` the running Discord
+  keeps executing the previous renderer, and Ctrl+R does not help because the reload re-runs
+  the same captured copy. The owner reported "it still cannot see images"; the bundle on disk
+  had vision code and was four minutes old, while the companion had been up 4h34m. Restarting
+  it fixed it instantly, and the model then described the picture.
+  → `readBundle` logs the bundle's size and build time at startup, `replaceBundle`
+  (`desktop/inject.ts`) swaps the init script, and `runCompanion` watches the file and prints
+  "renderer bundle rebuilt — press Ctrl+R in Discord to load it". Proven by rebuilding under
+  a live companion and watching that line appear.
+  The same trap exists for the extension with a different remedy: `chrome://extensions` → ↻
+  and reload the Discord tab. Any report of the shape "my change is not there" starts by
+  checking which build is actually running.
