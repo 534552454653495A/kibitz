@@ -316,6 +316,60 @@ export const CHECKS: ProbeCheck[] = [
     },
   },
   {
+    id: "panel-input",
+    description: "keystrokes typed into a panel field stay in the panel (Discord does not steal them)",
+    timeoutMs: 25_000,
+    /**
+     * The regression this defends shipped once: Shadow DOM retargets our events, Discord's
+     * global key handling saw them as "typing outside an input", focused its own message box
+     * and swallowed everything typed into Kibitz. The settings view's base-URL field is used
+     * rather than the chat composer because the composer only exists once a key is configured
+     * and the probe never configures one.
+     */
+    async run({ page }) {
+      const settingsTab: ElementHandle | null = await page.$(`[${PANEL_HOST_ATTR}] >>> [${ACTION_ATTR}="view-settings"]`);
+      if (!settingsTab) throw new Error(`no [${ACTION_ATTR}="view-settings"] in the panel`);
+      await settingsTab.click();
+      await settingsTab.dispose();
+
+      const field: ElementHandle | null = await until(
+        `[${PANEL_HOST_ATTR}] >>> input[type="url"]`,
+        10_000,
+        () => page.$(`[${PANEL_HOST_ATTR}] >>> input[type="url"]`),
+      );
+      await field.click();
+      const probeText = "/kibitz-probe";
+      await page.keyboard.type(probeText, { delay: 15 });
+      const seen = await page.evaluate(
+        (hostAttr: string) => {
+          const root = document.querySelector(`[${hostAttr}]`)?.shadowRoot ?? null;
+          const input = root?.querySelector('input[type="url"]');
+          const discordBox = document.querySelector('[role="textbox"][data-slate-editor="true"]');
+          return {
+            ours: input instanceof HTMLInputElement ? input.value : null,
+            // Present only on live Discord; the fixture has no message box.
+            discord: discordBox ? (discordBox.textContent ?? "").replace(/\uFEFF/g, "") : null,
+          };
+        },
+        PANEL_HOST_ATTR,
+      );
+      await field.dispose();
+      if (seen.ours === null || !seen.ours.endsWith(probeText)) {
+        throw new Error(`typing did not reach the panel field: value=${JSON.stringify(seen.ours)} discordBox=${JSON.stringify(seen.discord)}`);
+      }
+      if (seen.discord !== null && seen.discord.length > 0) {
+        throw new Error(`keystrokes leaked into Discord's message box: ${JSON.stringify(seen.discord.slice(0, 60))}`);
+      }
+
+      // Leave the panel on the chat view: scroll-back drives the chat toolbar.
+      const chatTab: ElementHandle | null = await page.$(`[${PANEL_HOST_ATTR}] >>> [${ACTION_ATTR}="view-chat"]`);
+      if (!chatTab) throw new Error(`no [${ACTION_ATTR}="view-chat"] to return to`);
+      await chatTab.click();
+      await chatTab.dispose();
+      return `typed ${probeText.length} chars into the panel; Discord's box ${seen.discord === null ? "absent (fixture)" : "stayed empty"}`;
+    },
+  },
+  {
     id: "scroll-back",
     description: "scan related messages scrolls back and collects more than what was rendered",
     timeoutMs: 90_000,

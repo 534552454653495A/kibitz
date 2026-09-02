@@ -88,36 +88,45 @@ Flatpak) launch paths exist but have not been exercised; reports welcome.
 
 ---
 
-## Configure your key (BYO key)
+## Configure your key (BYO key) — inside the panel
 
-Click the Kibitz toolbar icon (or open the extension's options page) and fill in:
+Open any Discord message's ✦ and click the **Settings** tab in the panel header. No separate
+page, no extension options screen (that still exists as a fallback).
 
 | Field | Notes |
 | --- | --- |
 | **Provider** | `OpenAI-compatible` covers OpenAI, OpenRouter, Groq, Gemini's OpenAI endpoint, Ollama, LM Studio — anything with `POST {baseUrl}/chat/completions`. `Anthropic` talks to the Messages API directly. |
 | **Base URL** | e.g. `https://api.openai.com/v1`, `https://openrouter.ai/api/v1`, `http://localhost:11434/v1`, `https://api.anthropic.com` |
-| **API key** | Stored locally only. For Ollama any non-empty string works. |
+| **API key** | Stored locally only; the field shows `••••` and never displays a stored key again. Leave it empty when editing other fields. For Ollama any non-empty string works. |
 | **Model** | e.g. `gpt-4o-mini`, `claude-sonnet-4-5`, `llama3.1` |
 
-When you press **Save**, Chrome asks you to grant the extension access to **that one origin**
-(e.g. `https://api.openai.com`). Kibitz ships with zero host permissions; the grant is
-scoped to the API you typed. Press **Test** to send a one-line request and confirm the
-key, URL and model work together.
+**Save** persists immediately. In the extension, Chrome must then approve the one origin you
+typed (Kibitz ships with zero host access): the panel shows **Grant access**, which opens a
+small window with a single button. **Test** sends a one-line request and reports the answer
+or the exact error. Local servers: Ollama needs `OLLAMA_ORIGINS=chrome-extension://*`.
 
-Local servers: Ollama needs `OLLAMA_ORIGINS=chrome-extension://*` (or `*`) so it accepts
-requests from an extension origin.
+Where the key lives: extension → `chrome.storage.local` on this machine, never synced, and
+the page cannot read it (the panel runs in the extension's isolated world). Desktop → the
+companion's `settings.json`; typed into the panel it passes through Discord's own window, so
+`npm run desktop -- setup` in a terminal is the stricter route. The settings view says which
+of the two you are in.
 
 ---
 
 ## Use
 
 1. Open any Discord channel. Every message gets a small ✦ at the end of its text.
-2. Click ✦. The panel opens on the right and the AI explains the message.
-3. Ask follow-ups in the input at the bottom.
+2. Click ✦. The panel opens and the AI explains the message.
+3. Ask follow-ups at the bottom — `Enter` sends, `Shift+Enter` is a newline,
+   `Ctrl/Cmd+Enter` sends from anywhere in the panel. **Stop** interrupts a running answer;
+   **Retry** re-sends the last failed one; each answer has a copy button.
 4. **Scan related messages** scrolls back through the channel (up to 200 messages / 45 s),
-   restores your scroll position, and asks the AI for a synthesis of the discussion around
-   the anchored message.
-5. `Esc` or ✕ closes the panel.
+   restores your scroll position, and asks for a synthesis of the discussion around the
+   anchored message.
+5. **Layout**: the header has dock-left, dock-right, float and expand. Drag the header to
+   move a floating panel (or drag a dock away from its edge to set it loose; drop it near an
+   edge to re-dock), drag the grip to resize. Your layout is remembered per host.
+6. `Esc` or ✕ closes the panel.
 
 ### Troubleshooting
 
@@ -127,8 +136,11 @@ requests from an extension origin.
   from `top` to the **Kibitz** entry (the extension's isolated world — the flag is per JS
   world, so setting it in `top` does nothing), then run `KIBITZ_DEBUG = true`. Lines are
   prefixed `[kibitz]`.
-- **"no-permission" errors:** open the options page and press **Save** again to re-grant
-  the API origin.
+- **"Chrome must approve access…"**: press **Grant access** in the settings tab (or open the
+  extension's options page and save again).
+- **Typing goes into Discord's message box instead of the panel?** That was a real bug, fixed
+  by isolating events at our shadow host; if it ever comes back, `npm run probe`'s
+  `panel-input` check is the regression guard and the fix belongs in `src/ui/shadow-host.ts`.
 
 ---
 

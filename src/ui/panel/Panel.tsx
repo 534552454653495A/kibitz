@@ -1,159 +1,119 @@
 /**
- * Panel view: a pure function of PanelModel plus the action callbacks mount.ts owns.
+ * The panel frame: header (drag handle, view tabs, layout controls, close) and the active
+ * view's body. A pure function of PanelContext — every observable state lives in the
+ * reducer, so the host attributes the probe reads and what the user sees cannot drift.
  *
- * Deliberately no local state beyond the composer's textarea: every observable state
- * lives in the reducer so the host attributes the probe reads and what the user sees
- * cannot drift apart. Assistant text is rendered as pre-wrapped plain text — a markdown
- * renderer would be a second place where untrusted model output meets the DOM.
+ * The frame deliberately knows nothing about chat or settings: it maps over the registry
+ * (registry.ts) to build tabs and calls `render(ctx)` on whichever view is active. Adding a
+ * view therefore changes one array, not this file.
+ *
+ * When the panel is closed the frame renders nothing at all, rather than rendering a hidden
+ * tree: unmounting is what discards a half-typed follow-up and the settings form's local
+ * state, which is the behaviour a user expects from "I closed it".
  */
-import { useEffect, useRef } from "preact/hooks";
-import type { Platform, UniversalMessage } from "../../core/types";
-import { ACTION_ATTR } from "../../shared/dom-markers";
-import type { PanelModel, Turn } from "./state";
+import type { VNode } from "preact";
+import { ACTION_ATTR, type ActionName, type LayoutMode } from "../../shared/dom-markers";
+import { DRAG_ATTR } from "./layout";
+import { findView, VIEWS } from "./registry";
+import type { PanelContext } from "./views";
 
-export interface PanelActions {
-  close(): void;
-  send(text: string): void;
-  scan(): void;
-  stop(): void;
-  openOptions(): void;
+interface DockControl {
+  action: ActionName;
+  mode: LayoutMode;
+  glyph: string;
+  label: string;
 }
 
-export interface PanelProps {
-  platform: Platform;
-  model: PanelModel;
-  actions: PanelActions;
-  /** Host-specific sentence under the "configure" call-to-action (Shell.optionsHint). */
-  optionsHint: string;
-}
+const DOCK_CONTROLS: DockControl[] = [
+  { action: "dock-left", mode: "left", glyph: "⇤", label: "Dock left" },
+  { action: "float", mode: "float", glyph: "▣", label: "Float" },
+  { action: "dock-right", mode: "right", glyph: "⇥", label: "Dock right" },
+];
 
-function MessageCard({ message }: { message: UniversalMessage }) {
-  const extras: string[] = [];
-  if (message.attachments.length > 0) extras.push(`${message.attachments.length} attachment(s)`);
-  if (message.embeds.length > 0) extras.push(`${message.embeds.length} embed(s)`);
-  if (message.isSystem) extras.push("system notice");
-  return (
-    <section class="card">
-      {message.replyTo !== undefined && (
-        <div class="reply">
-          ↳ reply to {message.replyTo.authorName ?? "unknown"}
-          {message.replyTo.excerpt !== undefined ? `: ${message.replyTo.excerpt}` : ""}
-        </div>
-      )}
-      <div class="meta">
-        <span class="author">{message.author.name}</span>
-        <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleString()}</time>
-      </div>
-      <div class="content">{message.content}</div>
-      {extras.length > 0 && <div class="extras">{extras.join(" · ")}</div>}
-    </section>
-  );
-}
+export function Panel(ctx: PanelContext): VNode | null {
+  const { model, actions } = ctx;
+  if (model.status === "closed") return null;
 
-function Conversation({ turns }: { turns: Turn[] }) {
-  const box = useRef<HTMLDivElement>(null);
-  // Follow the stream: the newest token is what the reader is waiting for.
-  useEffect(() => {
-    const el = box.current;
-    if (el !== null) el.scrollTop = el.scrollHeight;
-  }, [turns]);
-  return (
-    <div class="conversation" ref={box}>
-      {turns.map((t, i) => (
-        <div class={`turn ${t.role}`} key={i}>
-          {t.text}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function Composer({ actions, disabled }: { actions: PanelActions; disabled: boolean }) {
-  const input = useRef<HTMLTextAreaElement>(null);
-  const submit = (): void => {
-    const el = input.current;
-    if (el === null) return;
-    const text = el.value.trim();
-    if (text === "") return;
-    el.value = "";
-    actions.send(text);
-  };
-  return (
-    <div class="composer">
-      <textarea
-        ref={input}
-        rows={1}
-        placeholder="Ask a follow-up… (Enter to send)"
-        disabled={disabled}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            submit();
-          }
-        }}
-      />
-      <button class="button primary" {...{ [ACTION_ATTR]: "send" }} disabled={disabled} onClick={submit}>
-        Send
-      </button>
-    </div>
-  );
-}
-
-export function Panel({ platform, model, actions, optionsHint }: PanelProps) {
-  const scanBusy = model.scan.state === "running";
-  const scanLabel =
-    model.scan.state === "running"
-      ? `Scanning… ${model.scan.count}`
-      : model.scan.state === "done"
-        ? `Scanned ${model.scan.count} messages`
-        : model.scan.state === "error"
-          ? "Scan failed"
-          : "";
+  const views = VIEWS.filter((view) => view.available(ctx));
+  const active = findView(model.view) ?? VIEWS[0];
 
   return (
     <div class="panel">
       <header class="header">
-        <span class="title">
-          Kibitz <span class="platform">· {platform}</span>
-        </span>
-        <button class="icon-button" {...{ [ACTION_ATTR]: "close" }} title="Close (Esc)" aria-label="Close" onClick={actions.close}>
-          ×
-        </button>
+        <div class={`drag${model.layout.layout.mode === "float" ? " movable" : ""}`} {...{ [DRAG_ATTR]: "move" }}>
+          <span class="title">Kibitz</span>
+          <span class="platform">{ctx.platform}</span>
+        </div>
+
+        <nav class="tabs" role="tablist">
+          {views.map((view) => {
+            const action: ActionName = `view-${view.id}`;
+            const selected = view.id === model.view;
+            return (
+              <button
+                key={view.id}
+                class={selected ? "tab selected" : "tab"}
+                role="tab"
+                aria-selected={selected}
+                title={view.title}
+                {...{ [ACTION_ATTR]: action }}
+                onClick={() => actions.showView(view.id)}
+              >
+                <span class="tab-icon">{view.icon}</span>
+                <span class="tab-label">{view.title}</span>
+              </button>
+            );
+          })}
+        </nav>
+
+        <div class="controls">
+          {DOCK_CONTROLS.map((control) => (
+            <button
+              key={control.action}
+              class={model.layout.layout.mode === control.mode ? "icon-button selected" : "icon-button"}
+              title={control.label}
+              aria-label={control.label}
+              aria-pressed={model.layout.layout.mode === control.mode}
+              {...{ [ACTION_ATTR]: control.action }}
+              onClick={() => actions.setLayout(control.mode)}
+            >
+              {control.glyph}
+            </button>
+          ))}
+          <button
+            class={model.layout.expanded ? "icon-button selected" : "icon-button"}
+            title={model.layout.expanded ? "Shrink" : "Expand"}
+            aria-label="Expand"
+            aria-pressed={model.layout.expanded}
+            {...{ [ACTION_ATTR]: "expand" }}
+            onClick={actions.toggleExpanded}
+          >
+            ⤢
+          </button>
+          <button
+            class="icon-button"
+            title="Reset size and position"
+            aria-label="Reset layout"
+            {...{ [ACTION_ATTR]: "reset-layout" }}
+            onClick={actions.resetLayout}
+          >
+            ⟲
+          </button>
+          <button
+            class="icon-button close"
+            title="Close (Esc)"
+            aria-label="Close"
+            {...{ [ACTION_ATTR]: "close" }}
+            onClick={actions.close}
+          >
+            ×
+          </button>
+        </div>
       </header>
 
-      {model.status === "loading" && <div class="status">Reading message…</div>}
-      {model.status === "error" && <div class="status error">Could not read this message.{"\n"}{model.error}</div>}
-      {model.message !== null && <MessageCard message={model.message} />}
+      <div class="body">{active?.render(ctx)}</div>
 
-      {model.status === "ready" && model.configured === false && (
-        <div class="cta">
-          <p>Kibitz needs an API key before it can explain anything. {optionsHint}</p>
-          <button class="button primary" {...{ [ACTION_ATTR]: "open-options" }} onClick={actions.openOptions}>
-            Configure API key
-          </button>
-        </div>
-      )}
-
-      {model.status === "ready" && <Conversation turns={model.turns} />}
-
-      {model.status === "ready" && (
-        <div class="toolbar">
-          <button class="button" {...{ [ACTION_ATTR]: "scan" }} disabled={scanBusy || model.streaming} onClick={actions.scan}>
-            Scan related messages
-          </button>
-          <span>{scanLabel}</span>
-          <span class="spacer" />
-          {model.streaming && (
-            <button class="button" {...{ [ACTION_ATTR]: "stop" }} onClick={actions.stop}>
-              Stop
-            </button>
-          )}
-        </div>
-      )}
-
-      {model.status === "ready" && model.configured === true && (
-        <Composer actions={actions} disabled={model.streaming} />
-      )}
+      <div class="grip" {...{ [DRAG_ATTR]: "resize" }} title="Drag to resize" aria-hidden="true" />
     </div>
   );
 }

@@ -17,7 +17,8 @@ import { log } from "../src/shared/log";
 import { isDiscordUrl } from "./cdp";
 import { attachKibitz, deliver } from "./inject";
 import { createDesktopRequestHandler } from "./request-handler";
-import { loadFileSettings, settingsPath } from "./settings-store";
+import { loadFileSettings, saveFileSettings, settingsPath } from "./settings-store";
+import { loadUiState, saveUiState, uiStatePath } from "./ui-state-store";
 
 /** Something the user can fix (missing build, missing install, wrong flags). The CLI maps it to exit 2. */
 export class UserError extends Error {
@@ -66,6 +67,9 @@ async function findMainPage(browser: Browser): Promise<Page> {
 export async function runCompanion(opts: CompanionOptions): Promise<void> {
   const { bundle } = opts;
   const file = opts.settingsPath ?? settingsPath();
+  // Preferences live beside whichever settings file is in play, so an overridden
+  // `settingsPath` (tests, a second profile) keeps both halves of the state together.
+  const uiState = uiStatePath(file);
   const browser = await puppeteer.connect({ browserURL: `http://127.0.0.1:${opts.port}`, defaultViewport: null });
   log.warn(SECURITY_NOTE);
 
@@ -76,6 +80,9 @@ export async function runCompanion(opts: CompanionOptions): Promise<void> {
     wired.add(page);
     const handler = createDesktopRequestHandler({
       loadSettings: () => loadFileSettings(file),
+      saveSettings: (settings) => saveFileSettings(settings, file),
+      loadUiState: () => loadUiState(uiState),
+      saveUiState: (state) => saveUiState(state, uiState),
       deliver: (json) => deliver(page, json),
       openOptions: () => console.log(setupInstructions(file)),
     });

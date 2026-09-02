@@ -5,12 +5,23 @@
  * worker may be terminated between two answers, and a Port that died with it looks
  * connected until the first postMessage throws. Connecting per request keeps the worker
  * alive exactly as long as one answer takes and turns "worker died" into a clean reject.
+ *
+ * Every one-shot reply is narrowed before it reaches the panel (shared/replies.ts): a
+ * `sendMessage` whose listener threw resolves with `undefined`, so an unchecked cast would
+ * surface a service-worker crash as a blank settings form instead of an error.
  */
-import type { ChatMessage, PortRequest, PortResponse, RuntimeRequest, SettingsStatus } from "../core/messaging";
+import type {
+  ChatMessage,
+  PortRequest,
+  PortResponse,
+  RuntimeRequest,
+  SettingsStatus,
+} from "../core/messaging";
 import { CHAT_PORT_NAME } from "../core/messaging";
 import { isRecord } from "../core/validate";
 import { ext } from "../shared/ext";
-import { ChatError, type Shell, type StreamChatOptions } from "./types";
+import { readDraft, readGranted, readSaveResult, readUiState } from "./replies";
+import { ChatError, type SaveSettingsResult, type SettingsDraft, type SettingsInput, type Shell, type StreamChatOptions } from "./types";
 
 function streamChat(messages: ChatMessage[], { onDelta, signal }: StreamChatOptions): Promise<void> {
   if (signal.aborted) return Promise.reject(new ChatError("aborted", "cancelled before start"));
@@ -66,25 +77,56 @@ function streamChat(messages: ChatMessage[], { onDelta, signal }: StreamChatOpti
   return promise;
 }
 
-async function settingsStatus(): Promise<SettingsStatus> {
-  const request: RuntimeRequest = { type: "settings-status" };
+/** One round trip to the worker. A dead listener resolves with `undefined`, hence the guard. */
+async function call(request: RuntimeRequest): Promise<Record<string, unknown>> {
   const reply: unknown = await ext.runtime.sendMessage(request);
-  if (!isRecord(reply) || typeof reply.configured !== "boolean") {
-    throw new Error("background returned no settings status");
-  }
+  if (!isRecord(reply)) throw new Error(`background returned no reply to ${request.type}`);
+  return reply;
+}
+
+async function settingsStatus(): Promise<SettingsStatus> {
+  const reply = await call({ type: "settings-status" });
+  if (typeof reply.configured !== "boolean") throw new Error("background returned no settings status");
   return reply as unknown as SettingsStatus;
 }
 
+async function loadSettings(): Promise<SettingsDraft | null> {
+  return readDraft(await call({ type: "load-settings" }), "background");
+}
+
+async function saveSettings(input: SettingsInput): Promise<SaveSettingsResult> {
+  return readSaveResult(await call({ type: "save-settings", input }), "background");
+}
+
+async function requestAccess(origin: string): Promise<boolean> {
+  return readGranted(await call({ type: "request-access", origin }), "background");
+}
+
+async function loadUiState(): Promise<Record<string, unknown>> {
+  return readUiState(await call({ type: "load-ui-state" }));
+}
+
+async function saveUiState(state: Record<string, unknown>): Promise<void> {
+  await call({ type: "save-ui-state", state });
+}
+
 async function openOptions(): Promise<void> {
-  const request: RuntimeRequest = { type: "open-options" };
-  await ext.runtime.sendMessage(request);
+  await call({ type: "open-options" });
 }
 
 export function createExtensionShell(): Shell {
   return {
     streamChat,
     settingsStatus,
+    loadSettings,
+    saveSettings,
+    requestAccess,
     openOptions,
-    optionsHint: "Your key stays in this browser.",
+    loadUiState,
+    saveUiState,
+    // The panel runs in the isolated world: Discord's JS cannot read what is typed into it,
+    // so the settings view may take the key without the warning the desktop host needs.
+    capabilities: { keyIsPageVisible: false, canOpenOptionsPage: true },
+    keyStorageHint: "Stored with the extension on this machine (chrome.storage.local, never synced).",
   };
 }

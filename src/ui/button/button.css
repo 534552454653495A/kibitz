@@ -1,26 +1,49 @@
 /* Button stylesheet, injected into each button's shadow root. Only :host and our own
    elements are styled; nothing here depends on the page's CSS (AGENTS.md 3.5). Kept
-   deliberately quiet: it sits next to every message and must not compete with them. */
+   deliberately quiet: it sits next to every message and must not compete with them.
+
+   The "fade in when you hover the message" behaviour Discord's own buttons have is not
+   available to us: the message element is outside this shadow tree, so no selector here
+   can see its :hover. The honest approximation is a permanently dimmed button that comes
+   up to full strength on its own hover/focus — visible enough to be discoverable, quiet
+   enough to ignore. */
 
 button {
   appearance: none;
   border: 0;
   margin: 0;
   padding: 0;
-  width: 20px;
-  height: 20px;
-  border-radius: 4px;
+  width: 19px;
+  height: 19px;
+  border-radius: 5px;
   background: transparent;
-  color: rgba(148, 155, 164, 0.75);
-  font: 13px/20px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: rgb(148, 155, 164);
+  font: 13px/19px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   text-align: center;
   cursor: pointer;
   vertical-align: middle;
+  opacity: 0.55;
+  transition: opacity 120ms ease, background-color 120ms ease, color 120ms ease;
 }
 
 button:hover,
 button:focus-visible {
-  background: rgba(88, 101, 242, 0.25);
-  color: #dcdfff;
+  opacity: 1;
+  background: rgba(88, 101, 242, 0.28);
+  color: rgb(220, 223, 255);
   outline: none;
+}
+
+button:active {
+  transform: translateY(1px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button {
+    transition: none;
+  }
+
+  button:active {
+    transform: none;
+  }
 }

@@ -2,6 +2,11 @@
 <!--
   Kibitz settings page. Plain HTML + options.ts: it is a four-field form, and a framework
   would be more code than the form. Element ids are the contract options.ts binds to.
+
+  Two views live in one page. The second (#grant-view, shown when the URL carries ?grant=)
+  exists because Chrome grants an optional host permission only from a user gesture in an
+  extension page: the service worker cannot prompt and neither can the in-page panel, so
+  the background opens this page as a small popup with a single button that can.
 -->
 <html lang="en">
   <head>
@@ -12,35 +17,50 @@
   </head>
   <body>
     <main>
-      <h1>Kibitz settings</h1>
-      <p class="lede">
-        Bring your own API key. It is stored only on this machine (<code>chrome.storage.local</code>)
-        and used only by the extension's background worker.
-      </p>
-
-      <form id="settings-form" autocomplete="off">
-        <label for="provider">Provider</label>
-        <select id="provider"></select>
-        <p class="hint" id="provider-hint"></p>
-
-        <label for="base-url">Base URL</label>
-        <input id="base-url" type="url" spellcheck="false" placeholder="https://api.openai.com/v1" />
-
-        <label for="api-key">API key</label>
-        <input id="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…" />
-
-        <label for="model">Model</label>
-        <input id="model" type="text" spellcheck="false" placeholder="gpt-4o-mini" />
-
+      <section id="grant-view" hidden>
+        <h1>Allow Kibitz to reach your API</h1>
+        <p class="lede">
+          Your settings are saved. Chrome still needs your permission for this one address
+          before the extension may send anything to it.
+        </p>
+        <p class="grant-origin" id="grant-origin"></p>
         <div class="actions">
-          <button type="submit" id="save">Save</button>
-          <button type="button" id="test">Test</button>
-          <span id="permission" class="permission" data-granted="unknown">Permission: unknown</span>
+          <button type="button" id="grant">Allow access</button>
         </div>
-      </form>
+        <p id="grant-status" class="status" role="status" aria-live="polite"></p>
+      </section>
 
-      <p id="status" class="status" role="status" aria-live="polite"></p>
-      <pre id="test-output" class="test-output" hidden></pre>
+      <section id="settings-view">
+        <h1>Kibitz settings</h1>
+        <p class="lede">
+          Bring your own API key. It is stored only on this machine (<code>chrome.storage.local</code>)
+          and used only by the extension's background worker.
+        </p>
+
+        <form id="settings-form" autocomplete="off">
+          <label for="provider">Provider</label>
+          <select id="provider"></select>
+          <p class="hint" id="provider-hint"></p>
+
+          <label for="base-url">Base URL</label>
+          <input id="base-url" type="url" spellcheck="false" placeholder="https://api.openai.com/v1" />
+
+          <label for="api-key">API key</label>
+          <input id="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…" />
+
+          <label for="model">Model</label>
+          <input id="model" type="text" spellcheck="false" placeholder="gpt-4o-mini" />
+
+          <div class="actions">
+            <button type="submit" id="save">Save</button>
+            <button type="button" id="test">Test</button>
+            <span id="permission" class="permission" data-granted="unknown">Permission: unknown</span>
+          </div>
+        </form>
+
+        <p id="status" class="status" role="status" aria-live="polite"></p>
+        <pre id="test-output" class="test-output" hidden></pre>
+      </section>
     </main>
     <script src="options.js"></script>
   </body>

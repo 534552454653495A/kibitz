@@ -1,5 +1,5 @@
 import { setImmediate as nextTick } from "node:timers/promises";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { createDesktopRequestHandler, type DesktopRequestHandler, type RequestHandlerDeps } from "../../desktop/request-handler";
 import type { ChatMessage } from "../../src/core/messaging";
 import type { Settings } from "../../src/core/settings";
@@ -31,15 +31,25 @@ interface Harness {
   terminal(requestId: string): Promise<DesktopDelivery>;
   /** Resolves when the n-th delivery has arrived. */
   nth(n: number): Promise<DesktopDelivery>;
-  openOptions: ReturnType<typeof vi.fn>;
+  openOptions: Mock;
+  /** What the handler persisted, standing in for settings.json and ui-state.json. */
+  written: { settings: Settings | null; uiState: Record<string, unknown> };
 }
 
 function harness(settings: Settings | null): Harness {
   const deliveries: DesktopDelivery[] = [];
   const listeners: Array<() => void> = [];
   const openOptions = vi.fn();
+  const written = { settings, uiState: {} as Record<string, unknown> };
   const deps: RequestHandlerDeps = {
-    loadSettings: async () => settings,
+    loadSettings: async () => written.settings,
+    saveSettings: async (next) => {
+      written.settings = next;
+    },
+    loadUiState: async () => written.uiState,
+    saveUiState: async (state) => {
+      written.uiState = state;
+    },
     deliver: async (json) => {
       deliveries.push(JSON.parse(json) as DesktopDelivery);
       for (const fn of listeners.splice(0)) fn();
@@ -61,6 +71,7 @@ function harness(settings: Settings | null): Harness {
     handler: createDesktopRequestHandler(deps),
     deliveries,
     openOptions,
+    written,
     terminal: (requestId) =>
       waitFor(() => deliveries.find((d) => d.requestId === requestId && (d.type === "done" || d.type === "error"))),
     nth: (n) => waitFor(() => deliveries[n - 1]),
@@ -162,6 +173,75 @@ describe("control requests", () => {
     const h = harness(SETTINGS);
     expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "open-options" })))).toEqual({ ok: true });
     expect(h.openOptions).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("settings requests", () => {
+  it("load-settings hands back the draft with hasKey instead of the key itself", async () => {
+    const h = harness(SETTINGS);
+    const json = await h.handler.handle(JSON.stringify({ type: "load-settings" }));
+    expect(JSON.parse(json)).toEqual({ draft: { provider: "anthropic", baseUrl: "https://example.test", model: "m", hasKey: true } });
+    expect(json).not.toContain(SETTINGS.apiKey);
+  });
+
+  it("load-settings answers {draft:null} before the wizard has run", async () => {
+    const h = harness(null);
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "load-settings" })))).toEqual({ draft: null });
+  });
+
+  it("save-settings with an empty key keeps the stored one instead of wiping it", async () => {
+    const h = harness(SETTINGS);
+    const input = { provider: "anthropic", baseUrl: "https://example.test", model: "claude-next", apiKey: "" };
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-settings", input })))).toEqual({ ok: true });
+    expect(h.written.settings).toEqual({ ...SETTINGS, model: "claude-next" });
+  });
+
+  it("save-settings refuses and writes nothing when neither a typed nor a stored key exists", async () => {
+    const h = harness(null);
+    const input = { provider: "anthropic", baseUrl: "https://example.test", model: "m", apiKey: "" };
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-settings", input })))).toEqual({
+      ok: false,
+      error: "An API key is required.",
+    });
+    expect(h.written.settings).toBeNull();
+  });
+
+  it("save-settings rejects a base URL the provider client could not use", async () => {
+    const h = harness(SETTINGS);
+    const input = { provider: "anthropic", baseUrl: "ftp://example.test", model: "m", apiKey: "sk-new" };
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-settings", input })))).toEqual({
+      ok: false,
+      error: "Base URL must be a full http(s) URL, for example https://api.openai.com/v1.",
+    });
+    expect(h.written.settings).toEqual(SETTINGS);
+  });
+
+  it("answers {ok:false} to a save-settings whose input is not a full draft", async () => {
+    const h = harness(SETTINGS);
+    const json = await h.handler.handle(JSON.stringify({ type: "save-settings", input: { provider: "anthropic" } }));
+    expect(JSON.parse(json)).toMatchObject({ ok: false });
+    expect(h.written.settings).toEqual(SETTINGS);
+  });
+
+  it("request-access is granted: a Node process needs no host permission", async () => {
+    const h = harness(SETTINGS);
+    const json = await h.handler.handle(JSON.stringify({ type: "request-access", origin: "https://example.test/*" }));
+    expect(JSON.parse(json)).toEqual({ granted: true });
+  });
+});
+
+describe("ui state requests", () => {
+  it("round-trips the panel's layout blob through the companion", async () => {
+    const h = harness(SETTINGS);
+    const state = { panelLayout: { mode: "left", size: 360 }, view: "chat" };
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-ui-state", state })))).toEqual({ ok: true });
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "load-ui-state" })))).toEqual({ state });
+  });
+
+  it("answers {ok:false} to a save-ui-state carrying a non-object state", async () => {
+    const h = harness(SETTINGS);
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-ui-state", state: "left" })))).toMatchObject({ ok: false });
+    expect(h.written.uiState).toEqual({});
   });
 });
 

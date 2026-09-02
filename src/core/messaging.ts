@@ -50,10 +50,27 @@ export type PortResponse =
   | { type: "done"; requestId: string }
   | { type: "error"; requestId: string; code: ChatErrorCode; message: string };
 
-/** One-shot messages (chrome.runtime.sendMessage). */
+/**
+ * One-shot messages (extension: chrome.runtime.sendMessage; desktop: the CDP call binding).
+ * The panel edits settings in place, so these carry a draft in and a redacted view out —
+ * a stored API key is never sent back to the UI.
+ */
 export type RuntimeRequest =
   | { type: "open-options" }
-  | { type: "settings-status" };
+  | { type: "settings-status" }
+  | { type: "load-settings" }
+  | { type: "save-settings"; input: SettingsInputMessage }
+  | { type: "request-access"; origin: string }
+  | { type: "load-ui-state" }
+  | { type: "save-ui-state"; state: Record<string, unknown> };
+
+export interface SettingsInputMessage {
+  provider: string;
+  baseUrl: string;
+  model: string;
+  /** Empty = keep the stored key. */
+  apiKey: string;
+}
 
 export interface SettingsStatus {
   configured: boolean;
@@ -61,4 +78,20 @@ export interface SettingsStatus {
   model?: string;
 }
 
-export type RuntimeResponse = SettingsStatus | { ok: true };
+/** Settings as the UI may see them: no key, only whether one is stored. */
+export interface SettingsDraftMessage {
+  provider: string;
+  baseUrl: string;
+  model: string;
+  hasKey: boolean;
+}
+
+export type SaveSettingsMessage = { ok: true } | { ok: false; error: string; grantOrigin?: string };
+
+export type RuntimeResponse =
+  | SettingsStatus
+  | { draft: SettingsDraftMessage | null }
+  | SaveSettingsMessage
+  | { granted: boolean }
+  | { state: Record<string, unknown> }
+  | { ok: true };

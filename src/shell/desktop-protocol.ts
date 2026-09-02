@@ -12,7 +12,7 @@
  * shells stay behaviourally identical; only the transport differs. Strings, not objects,
  * for the same reason page-rpc.ts uses strings: nothing with identity crosses a boundary.
  */
-import type { PortRequest, PortResponse, RuntimeRequest, SettingsStatus } from "../core/messaging";
+import type { PortRequest, PortResponse, RuntimeRequest, RuntimeResponse } from "../core/messaging";
 
 export const DESKTOP_CALL_BINDING = "__kibitzDesktopCall";
 export const DESKTOP_DELIVER_FN = "__kibitzDesktopDeliver";
@@ -21,8 +21,13 @@ export const DESKTOP_MARKER = "__kibitzDesktop";
 
 export type DesktopRequest = PortRequest | RuntimeRequest;
 
-/** Immediate reply to a DesktopRequest. Chat deltas/done/error arrive later via DESKTOP_DELIVER_FN. */
-export type DesktopReply = { ok: true } | { ok: false; error: string } | SettingsStatus;
+/**
+ * Immediate reply to a DesktopRequest. Chat deltas/done/error arrive later via
+ * DESKTOP_DELIVER_FN. It is the extension's own RuntimeResponse plus one failure shape the
+ * extension does not need: a CDP binding call must always resolve with something, so a
+ * malformed or throwing request comes back as `{ok:false,error}` instead of rejecting.
+ */
+export type DesktopReply = RuntimeResponse | { ok: false; error: string };
 
 /** Pushed by the companion; `requestId` matches the originating chat request. */
 export type DesktopDelivery = PortResponse;

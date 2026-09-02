@@ -16,7 +16,8 @@
 import type { ChatMessage, SettingsStatus } from "../core/messaging";
 import { isRecord } from "../core/validate";
 import { DESKTOP_CALL_BINDING, DESKTOP_DELIVER_FN, type DesktopDelivery, type DesktopRequest } from "./desktop-protocol";
-import { ChatError, type Shell, type StreamChatOptions } from "./types";
+import { readDraft, readSaveResult, readUiState } from "./replies";
+import { ChatError, type SaveSettingsResult, type SettingsDraft, type SettingsInput, type Shell, type StreamChatOptions } from "./types";
 
 const NOT_CONNECTED = "Kibitz desktop companion is not connected";
 
@@ -112,6 +113,30 @@ async function settingsStatus(): Promise<SettingsStatus> {
   return reply as unknown as SettingsStatus;
 }
 
+async function loadSettings(): Promise<SettingsDraft | null> {
+  return readDraft(await send({ type: "load-settings" }), "companion");
+}
+
+async function saveSettings(input: SettingsInput): Promise<SaveSettingsResult> {
+  return readSaveResult(await send({ type: "save-settings", input }), "companion");
+}
+
+/**
+ * Nothing to ask for: the companion is a plain Node process making the HTTP call, with no
+ * per-origin permission model between it and the provider. It answers `request-access` too
+ * (an older renderer may still ask), but the shell short-circuits rather than spend a round
+ * trip on a foregone answer.
+ */
+const GRANTED_WITHOUT_ASKING = (): Promise<boolean> => Promise.resolve(true);
+
+async function loadUiState(): Promise<Record<string, unknown>> {
+  return readUiState(await send({ type: "load-ui-state" }));
+}
+
+async function saveUiState(state: Record<string, unknown>): Promise<void> {
+  await send({ type: "save-ui-state", state });
+}
+
 async function openOptions(): Promise<void> {
   await send({ type: "open-options" });
 }
@@ -121,7 +146,16 @@ export function createDesktopShell(): Shell {
   return {
     streamChat,
     settingsStatus,
+    loadSettings,
+    saveSettings,
+    requestAccess: GRANTED_WITHOUT_ASKING,
     openOptions,
-    optionsHint: "Run `npm run desktop -- setup` in a terminal, then reload Discord (Ctrl+R).",
+    loadUiState,
+    saveUiState,
+    // The renderer shares Discord's realm, so anything typed into the panel is reachable by
+    // Discord's own JS; the settings view warns and points at the terminal wizard instead.
+    capabilities: { keyIsPageVisible: true, canOpenOptionsPage: false },
+    keyStorageHint:
+      "Stored by the Kibitz companion on this machine (settings.json). Typed here, the key passes through Discord's own window — `npm run desktop -- setup` avoids that.",
   };
 }

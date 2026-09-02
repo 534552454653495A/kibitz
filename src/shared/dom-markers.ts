@@ -31,6 +31,37 @@ export const SCAN_COUNT_ATTR = "data-kibitz-scan-count";
 /**
  * Inside shadow roots, on interactive elements. Values are stable action names so a
  * driver can do `host.shadowRoot.querySelector('[data-kibitz-action="scan"]')`.
+ * Adding a feature adds a name here first; the panel's action map is typed against it.
  */
 export const ACTION_ATTR = "data-kibitz-action";
-export type ActionName = "explain" | "scan" | "close" | "send" | "open-options" | "stop";
+export type ActionName =
+  | "explain"
+  | "scan"
+  | "close"
+  | "send"
+  | "stop"
+  | "open-options"
+  /** Header tabs (one per registered view) and the back arrow. */
+  | "view-chat"
+  | "view-settings"
+  /** Settings view. */
+  | "save-settings"
+  | "test-settings"
+  | "grant-access"
+  | "reveal-key"
+  /** Layout. */
+  | "dock-left"
+  | "dock-right"
+  | "float"
+  | "expand"
+  | "reset-layout"
+  /** Per-turn affordances. */
+  | "copy-turn"
+  | "retry";
+
+/** On the panel host: which registered view is showing (`PanelView.id`). */
+export const VIEW_ATTR = "data-kibitz-view";
+
+/** On the panel host: current layout mode, so tests/probe can assert docking. */
+export const LAYOUT_ATTR = "data-kibitz-layout";
+export type LayoutMode = "left" | "right" | "float";

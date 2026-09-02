@@ -176,3 +176,40 @@ describe("desktop shell openOptions", () => {
     expect(companion.requests).toEqual([{ type: "open-options" }]);
   });
 });
+
+describe("desktop shell settings and ui state", () => {
+  it("returns null for load-settings before the wizard has written settings.json", async () => {
+    companion.reply["load-settings"] = { draft: null };
+    await expect(createDesktopShell().loadSettings()).resolves.toBeNull();
+  });
+
+  it("throws when the companion answers load-settings with a draft missing hasKey", async () => {
+    companion.reply["load-settings"] = { draft: { provider: "anthropic", baseUrl: "https://a.test", model: "m" } };
+    await expect(createDesktopShell().loadSettings()).rejects.toThrow(/companion returned a malformed settings draft/);
+  });
+
+  it("sends the draft as a save-settings request and surfaces the companion's refusal", async () => {
+    companion.reply["save-settings"] = { ok: false, error: "An API key is required." };
+    const input = { provider: "anthropic" as const, baseUrl: "https://a.test", model: "m", apiKey: "" };
+    await expect(createDesktopShell().saveSettings(input)).resolves.toEqual({ ok: false, error: "An API key is required." });
+    expect(companion.requests).toEqual([{ type: "save-settings", input }]);
+  });
+
+  it("grants access without a round trip, because the companion has no permission model", async () => {
+    await expect(createDesktopShell().requestAccess("https://a.test/*")).resolves.toBe(true);
+    expect(companion.requests).toEqual([]);
+  });
+
+  it("reads the stored ui state and falls back to {} when the companion sends none", async () => {
+    companion.reply["load-ui-state"] = { state: { panelLayout: { mode: "left", size: 380 } } };
+    await expect(createDesktopShell().loadUiState()).resolves.toEqual({ panelLayout: { mode: "left", size: 380 } });
+
+    companion.reply["load-ui-state"] = { ok: true };
+    await expect(createDesktopShell().loadUiState()).resolves.toEqual({});
+  });
+
+  it("sends the ui state blob verbatim on save", async () => {
+    await createDesktopShell().saveUiState({ view: "settings" });
+    expect(companion.requests).toEqual([{ type: "save-ui-state", state: { view: "settings" } }]);
+  });
+});

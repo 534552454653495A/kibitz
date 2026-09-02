@@ -48,12 +48,11 @@ src/core/               types.ts (UniversalMessage), adapter.ts (PlatformAdapter
                         context.ts, prompts/*.md
 src/adapters/discord/   selectors.ts, bridge-protocol.ts, bridge.main.ts, normalize.ts, adapter.ts, scroller.ts
 src/shell/              types.ts (Shell), extension.ts (Port to the service worker),
-                        desktop.ts + desktop-protocol.ts (CDP binding to the companion)
+                        desktop.ts + desktop-protocol.ts (CDP binding), replies.ts (reply validation)
 src/content/            start.ts (boot shared by hosts), index.ts (extension entry), injector.ts
 src/desktop/            renderer.ts (bundle injected into Discord desktop)
-src/ui/                 button/, panel/ (Preact in Shadow DOM), options/ (extension settings page)
-src/background/         index.ts (service worker), providers/ (openai-compatible, anthropic, sse, errors)
-src/shared/             ext.ts, log.ts, page-rpc.ts, settings.ts (chrome.storage), dom-markers.ts
+src/ui/                 shadow-host.ts (isolated hosts — 3.5), button/, options/ (extension page + grant),
+                        panel/ (frame, registry, views/chat, views/settings, state, layout, markdown)
 desktop/                kibitz-desktop companion (Node): cli.ts, companion.ts, inject.ts,
                         request-handler.ts, discord-launch.ts, settings-store.ts, setup.ts, cdp.ts
 probe/                  run.ts (--fixture, --shell extension|desktop), checks.ts, report.ts, outline.ts,
@@ -111,16 +110,40 @@ service worker; content scripts and the bridge never see the key.
 **Because:** `storage.sync` uploads to the user's Google account; a BYO key is the user's
 money. A content script shares a tab with a site we do not control — the key must not be
 reachable from there. The service worker requests host permission for exactly the API
-origin the user configured (`optional_host_permissions` + `permissions.request`), so the
+origin the user configured (`optional_host_permissions` + a one-button grant window), so the
 extension has zero host access until a user grants one.
 
-### 3.5 All injected UI lives in Shadow DOM
+Amendment (2026-09-02, owner's request): settings are edited **inside the panel**, so the
+key crosses into the UI layer. What that costs depends on the host, and `Shell.capabilities`
+carries the answer: in the extension the panel runs in the isolated world, so the page
+cannot read the field or our variables, and the key still travels content script → port →
+service worker → `storage.local`, never into the page realm. On the desktop the renderer
+*is* Discord's realm, so a key typed there is readable by Discord's own scripts;
+`keyIsPageVisible` is true, the settings view says so, and `npm run desktop -- setup`
+remains the safer path. A stored key is never sent back to the UI — `SettingsDraft` carries
+`hasKey`, not the key.
 
-Buttons and the panel are mounted inside `attachShadow({ mode: "open" })` hosts with their
-own stylesheet.
-**Because:** Discord's global CSS would restyle our UI, and our CSS would leak into
-Discord's. `mode: "open"` (not `closed`) so the probe and tests can drive the UI through
-`host.shadowRoot`.
+### 3.5 All injected UI lives in an isolated Shadow DOM host
+
+Buttons and the panel are created **only** through `createShadowHost`
+(`src/ui/shadow-host.ts`), never with a bare `attachShadow`.
+**Because** two things must be isolated, and only one of them is CSS:
+
+- **Styles** — Discord's global CSS would restyle our UI, and ours would leak into Discord.
+- **Events** — Shadow DOM *retargets* events: a keydown in our `<textarea>` reaches
+  `document` with `target` = the host `<div>`. Discord's global key handling reads that as
+  "the user is typing outside an input", focuses its own message box and takes the
+  keystrokes. Measured on Discord Stable (2026-09-02): typing `abc` into our composer left
+  it empty and put `abc` in Discord's message box — the chat was unusable from day one.
+  `createShadowHost` therefore stops keyboard, clipboard, pointer and wheel events at the
+  host in the **bubble** phase: our own handlers live inside the shadow tree and have
+  already run, while `document` never sees the event. A capture-phase guard on `window`
+  also blocks Discord but swallows our handlers too (measured: Enter inserted a newline
+  instead of sending), which is why the guard is on the host and not on window.
+
+`mode: "open"` (not `closed`) so tests and the probe can drive the UI through
+`host.shadowRoot`. The probe's `panel-input` check types into a panel field on live Discord
+and fails if the text lands anywhere else — that is the regression guard.
 
 ### 3.6 One file owns the Discord contract
 
@@ -201,11 +224,16 @@ Known canonical homes:
 | Host runtime from the UI | `Shell` (`src/shell/types.ts`): `createExtensionShell()` / `createDesktopShell()` |
 | Logging | `log` from `src/shared/log.ts` (prefix is what the probe filters on) |
 | Settings schema / validation | `parseSettings`, `PROVIDER_PRESETS`, `originPattern` (`src/core/settings.ts`) |
+| Panel draft + stored key → settings | `mergeSettingsInput` (`src/core/settings.ts`) — pure, Node-safe; used by `src/background/settings-service.ts` and `desktop/request-handler.ts` |
 | Settings persistence | extension: `src/shared/settings.ts` (chrome.storage); desktop: `desktop/settings-store.ts` (settings.json) |
 | LLM providers + error → ChatErrorCode | `createProvider` (`src/background/providers/index.ts`), `classifyError` (`providers/errors.ts`) — Node-safe, shared with the companion |
 | Prompt text | `.md` files in `src/core/prompts/`, rendered by `src/core/prompt.ts` |
 | SSE parsing | `src/background/providers/sse.ts` |
 | Inject into a Discord window over CDP | `attachKibitz` / `deliver` (`desktop/inject.ts`) — the probe's desktop mode uses the same functions |
+| Any injected UI element | `createShadowHost` (`src/ui/shadow-host.ts`) — never a bare `attachShadow`; it carries the event isolation (3.5) |
+| A new panel feature | a `PanelView` (`src/ui/panel/views.ts`) registered in `src/ui/panel/registry.ts`; its buttons get an `ActionName` in `src/shared/dom-markers.ts` and a method on `PanelActions` (`src/ui/panel/actions.ts`) |
+| Panel geometry | `src/ui/panel/layout.ts` (`clampLayout`, `layoutStyle`, `installLayoutController`) over `layout-model.ts` values; persisted through `Shell.loadUiState/saveUiState` |
+| Rendering model output | `renderMarkdown` (`src/ui/panel/markdown.ts`) — builds Preact nodes; `innerHTML` is never used on model or message text |
 
 Missing capability? Extend the canonical helper; do not fork it locally.
 
@@ -478,3 +506,16 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   → Section 3.8; the `Shell` seam; `dist/desktop-renderer.js` must be chrome-free (build
   check); Windows is the only exercised platform, macOS/Linux launch paths are marked
   untested in `desktop/discord-launch.ts`.
+- **2026-09-02 — The chat composer never worked, and nothing caught it.** The owner
+  reported "I cannot send messages" in the extension and dead buttons on the desktop. Cause:
+  Shadow DOM retargets events, so every keystroke in our textarea reached Discord's
+  document-level key handling, which focused Discord's own message box and typed there —
+  measured: `abc` into our composer left it empty and appeared in Discord's box. The unit
+  tests dispatched events at our elements directly (no Discord listeners), and the fixture
+  self-test has no Discord key handling, so both stayed green. Second finding: on the
+  desktop the only affordance without a key was a button that printed to a terminal the
+  user was not watching.
+  → `createShadowHost` with bubble-phase isolation (3.5); the probe's `panel-input` check
+  types into the panel on live Discord; settings moved into the panel (3.4 amendment).
+  Rule that generalises: **a UI regression that only appears inside the host page must be
+  caught by a live check, not by a jsdom test** — jsdom has no Discord.

@@ -22,11 +22,16 @@ const fakeRuntime = vi.hoisted(() => {
       emit: (msg: unknown) => void;
       drop: () => void;
     }>,
+    /** Every one-shot message the shell sent, so a test can assert what crossed the seam. */
+    sent: [] as unknown[],
     reply: {} as Record<string, unknown>,
   };
   const runtime = {
     lastError: undefined as { message: string } | undefined,
-    sendMessage: (req: { type: string }) => Promise.resolve(state.reply[req.type]),
+    sendMessage: (req: { type: string }) => {
+      state.sent.push(req);
+      return Promise.resolve(state.reply[req.type]);
+    },
     connect: () => {
       const listeners: Array<(msg: unknown) => void> = [];
       const disconnectListeners: Array<() => void> = [];
@@ -77,6 +82,7 @@ async function rejection(promise: Promise<unknown>): Promise<ChatError> {
 
 beforeEach(() => {
   fakeRuntime.ports.length = 0;
+  fakeRuntime.sent.length = 0;
   fakeRuntime.reply = {};
 });
 
@@ -136,5 +142,74 @@ describe("extension shell settingsStatus", () => {
   it("throws when the background answers without a boolean configured flag", async () => {
     fakeRuntime.reply["settings-status"] = { ok: true };
     await expect(createExtensionShell().settingsStatus()).rejects.toThrow(/settings status/);
+  });
+});
+
+describe("extension shell one-shot requests", () => {
+  it("returns null for load-settings when nothing is configured, and the draft otherwise", async () => {
+    fakeRuntime.reply["load-settings"] = { draft: null };
+    await expect(createExtensionShell().loadSettings()).resolves.toBeNull();
+
+    fakeRuntime.reply["load-settings"] = {
+      draft: { provider: "anthropic", baseUrl: "https://api.anthropic.com", model: "m", hasKey: true },
+    };
+    await expect(createExtensionShell().loadSettings()).resolves.toEqual({
+      provider: "anthropic",
+      baseUrl: "https://api.anthropic.com",
+      model: "m",
+      hasKey: true,
+    });
+  });
+
+  it("throws instead of handing the settings view a draft with an unknown provider", async () => {
+    fakeRuntime.reply["load-settings"] = { draft: { provider: "gemini", baseUrl: "https://x.test", model: "m", hasKey: true } };
+    await expect(createExtensionShell().loadSettings()).rejects.toThrow(/malformed settings draft/);
+  });
+
+  it("throws when the worker died mid-request and sendMessage resolved with nothing", async () => {
+    fakeRuntime.reply["load-settings"] = undefined;
+    await expect(createExtensionShell().loadSettings()).rejects.toThrow(/no reply to load-settings/);
+  });
+
+  it("forwards the draft unchanged and preserves grantOrigin so the panel can offer the grant", async () => {
+    fakeRuntime.reply["save-settings"] = {
+      ok: false,
+      error: "Settings saved. Chrome must approve access to https://api.openai.com/* before Kibitz can use it.",
+      grantOrigin: "https://api.openai.com/*",
+    };
+    const input = { provider: "openai-compatible" as const, baseUrl: "https://api.openai.com/v1", model: "gpt", apiKey: "sk-1" };
+    await expect(createExtensionShell().saveSettings(input)).resolves.toEqual({
+      ok: false,
+      error: "Settings saved. Chrome must approve access to https://api.openai.com/* before Kibitz can use it.",
+      grantOrigin: "https://api.openai.com/*",
+    });
+    expect(fakeRuntime.sent).toContainEqual({ type: "save-settings", input });
+  });
+
+  it("throws when a save reply is neither ok:true nor an error message", async () => {
+    fakeRuntime.reply["save-settings"] = { ok: false };
+    await expect(
+      createExtensionShell().saveSettings({ provider: "anthropic", baseUrl: "https://a.test", model: "m", apiKey: "" }),
+    ).rejects.toThrow(/malformed save result/);
+  });
+
+  it("reports the background's grant decision rather than assuming success", async () => {
+    fakeRuntime.reply["request-access"] = { granted: false };
+    await expect(createExtensionShell().requestAccess("https://api.openai.com/*")).resolves.toBe(false);
+    expect(fakeRuntime.sent).toContainEqual({ type: "request-access", origin: "https://api.openai.com/*" });
+  });
+
+  it("falls back to an empty ui state instead of throwing when the background has none stored", async () => {
+    fakeRuntime.reply["load-ui-state"] = { state: { panelLayout: { mode: "right" } } };
+    await expect(createExtensionShell().loadUiState()).resolves.toEqual({ panelLayout: { mode: "right" } });
+
+    fakeRuntime.reply["load-ui-state"] = { ok: true };
+    await expect(createExtensionShell().loadUiState()).resolves.toEqual({});
+  });
+
+  it("sends the ui state as one save-ui-state message", async () => {
+    fakeRuntime.reply["save-ui-state"] = { ok: true };
+    await createExtensionShell().saveUiState({ panelLayout: { mode: "float", x: 10 } });
+    expect(fakeRuntime.sent).toContainEqual({ type: "save-ui-state", state: { panelLayout: { mode: "float", x: 10 } } });
   });
 });

@@ -4,18 +4,42 @@
  *
  * `status` and `scan.state` are exactly the PanelState / ScanState vocabularies from
  * shared/dom-markers.ts because mount.ts copies them onto the host verbatim.
+ *
+ * Three things are deliberately *outside* the per-message lifecycle and therefore survive
+ * `open`/`close`: `layout` (the user placed the panel; reopening it somewhere else would be
+ * a bug), the settings `draft` (retyping a base URL because the panel closed is hostile) and
+ * the view — except that opening a message forces `chat`, because the click that opened the
+ * panel asked a question and the answer lives there.
  */
 import type { ChatMessage } from "../../core/messaging";
 import type { MessageRef, UniversalMessage } from "../../core/types";
 import type { PanelState, ScanState } from "../../shared/dom-markers";
+import type { SettingsDraft } from "../../shell/types";
+import { DEFAULT_LAYOUT_STATE, type LayoutState } from "./layout-model";
+import type { PanelView } from "./views";
 
 export interface Turn {
   role: "user" | "assistant" | "note" | "error";
   text: string;
 }
 
+/** Everything the in-panel settings form needs that is not the form's own field values. */
+export interface SettingsModel {
+  /** What the host has stored, minus the key; null until the view asked for it. */
+  draft: SettingsDraft | null;
+  /** One line under the form: save/test outcome. */
+  status: string | null;
+  /** Origin the host still needs permission for; drives the `grant-access` button. */
+  pendingGrant: string | null;
+  /** A save or a test is in flight. */
+  busy: boolean;
+}
+
 export interface PanelModel {
   status: PanelState;
+  /** Which registered view is showing; mirrored to VIEW_ATTR. */
+  view: PanelView["id"];
+  layout: LayoutState;
   ref: MessageRef | null;
   message: UniversalMessage | null;
   /** `${err.name}: ${err.message}` of a read failure; mirrored to PANEL_ERROR_ATTR. */
@@ -27,10 +51,15 @@ export interface PanelModel {
   history: ChatMessage[];
   streaming: boolean;
   scan: { state: ScanState; count: number };
+  settings: SettingsModel;
 }
+
+const NO_SETTINGS: SettingsModel = { draft: null, status: null, pendingGrant: null, busy: false };
 
 export const INITIAL: PanelModel = {
   status: "closed",
+  view: "chat",
+  layout: DEFAULT_LAYOUT_STATE,
   ref: null,
   message: null,
   error: null,
@@ -39,6 +68,7 @@ export const INITIAL: PanelModel = {
   history: [],
   streaming: false,
   scan: { state: "idle", count: 0 },
+  settings: NO_SETTINGS,
 };
 
 export type PanelAction =
@@ -51,12 +81,20 @@ export type PanelAction =
   | { type: "delta"; text: string }
   | { type: "stream-end" }
   | { type: "stream-failed"; error: string; unconfigured: boolean }
+  /** Clears the trailing error turn so a retried answer does not read as a second reply. */
+  | { type: "retry" }
   | { type: "user-turn"; text: string }
   | { type: "note"; text: string }
   | { type: "scan-start" }
   | { type: "scan-progress"; count: number }
   | { type: "scan-done"; count: number }
-  | { type: "scan-failed"; error: string };
+  | { type: "scan-failed"; error: string }
+  | { type: "show-view"; id: PanelView["id"] }
+  | { type: "layout"; state: LayoutState }
+  | { type: "settings-loaded"; draft: SettingsDraft | null }
+  | { type: "settings-busy"; busy: boolean }
+  /** Outcome of a save or a connectivity test; `grantOrigin` non-null only for saves. */
+  | { type: "settings-result"; status: string; grantOrigin: string | null };
 
 function appendToLastAssistant(turns: Turn[], text: string): Turn[] {
   const last = turns[turns.length - 1];
@@ -66,14 +104,26 @@ function appendToLastAssistant(turns: Turn[], text: string): Turn[] {
   return [...turns, { role: "assistant", text }];
 }
 
+/** Kept per-message state only; see the file header for what survives and why. */
+function resetFor(model: PanelModel, status: PanelState, ref: MessageRef | null): PanelModel {
+  return {
+    ...INITIAL,
+    status,
+    ref,
+    view: ref === null ? model.view : "chat",
+    layout: model.layout,
+    settings: { ...model.settings, status: null, pendingGrant: null, busy: false },
+  };
+}
+
 export function reduce(model: PanelModel, action: PanelAction): PanelModel {
   switch (action.type) {
     case "open":
       // Re-opening resets everything except what the reducer cannot know (settings),
       // which the controller re-asks anyway.
-      return { ...INITIAL, status: "loading", ref: action.ref };
+      return resetFor(model, "loading", action.ref);
     case "close":
-      return { ...INITIAL };
+      return resetFor(model, "closed", null);
     case "loaded":
       return { ...model, status: "ready", message: action.message, error: null };
     case "load-failed":
@@ -96,6 +146,10 @@ export function reduce(model: PanelModel, action: PanelAction): PanelModel {
         configured: action.unconfigured ? false : model.configured,
         turns: [...model.turns.filter((t) => t.role !== "assistant" || t.text !== ""), { role: "error", text: action.error }],
       };
+    case "retry": {
+      const last = model.turns[model.turns.length - 1];
+      return last?.role === "error" ? { ...model, turns: model.turns.slice(0, -1) } : model;
+    }
     case "user-turn":
       return { ...model, turns: [...model.turns, { role: "user", text: action.text }] };
     case "note":
@@ -114,6 +168,19 @@ export function reduce(model: PanelModel, action: PanelAction): PanelModel {
         scan: { state: "error", count: model.scan.count },
         error: action.error,
         turns: [...model.turns, { role: "error", text: action.error }],
+      };
+    case "show-view":
+      return { ...model, view: action.id };
+    case "layout":
+      return { ...model, layout: action.state };
+    case "settings-loaded":
+      return { ...model, settings: { ...model.settings, draft: action.draft } };
+    case "settings-busy":
+      return { ...model, settings: { ...model.settings, busy: action.busy } };
+    case "settings-result":
+      return {
+        ...model,
+        settings: { ...model.settings, busy: false, status: action.status, pendingGrant: action.grantOrigin },
       };
   }
 }

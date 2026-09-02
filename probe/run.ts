@@ -161,14 +161,22 @@ async function serveFixture(page: Page, url: string, fixturePath: string): Promi
 
 /**
  * Desktop fixture mode: what desktop/companion.ts does to a real Discord window, minus
- * settings — `loadSettings` yields null so the panel takes the not-configured path and no
- * provider is ever constructed. Attached before navigation, so the bundle reaches the
- * fixture document through evaluateOnNewDocument like it reaches a reloaded Discord.
+ * persistence — `loadSettings` yields null so the panel takes the not-configured path and
+ * no provider is ever constructed, and the writing deps are in-memory so a probe run never
+ * touches the developer's real settings.json. Attached before navigation, so the bundle
+ * reaches the fixture document through evaluateOnNewDocument like it reaches a reloaded
+ * Discord.
  */
 async function attachDesktopBundle(page: Page, distDir: string): Promise<void> {
   const bundle = await fs.readFile(path.join(distDir, DESKTOP_BUNDLE), "utf8");
+  let uiState: Record<string, unknown> = {};
   const handler = createDesktopRequestHandler({
     loadSettings: async () => null,
+    saveSettings: async () => {},
+    loadUiState: async () => uiState,
+    saveUiState: async (state) => {
+      uiState = state;
+    },
     deliver: (json) => deliver(page, json),
     openOptions: () => {},
   });

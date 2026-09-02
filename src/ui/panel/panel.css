@@ -1,25 +1,24 @@
 /* Panel stylesheet, injected into the panel's shadow root (AGENTS.md 3.5: no style bleed
-   either way). Layout is bound to :host and to our own data-kibitz-* attributes, never to
-   anything the page owns. Palette is dark-neutral so it sits on any host site's theme
-   without pretending to be part of it. */
+   either way). Every selector binds to :host, to our own data-kibitz-* attributes or to
+   class names we invented inside this shadow tree — never to anything the page owns.
 
-:host {
-  position: fixed;
-  top: 0;
-  right: 0;
-  height: 100vh;
-  width: 380px;
-  z-index: 2147483000;
-  display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
-  background: #1b1c1f;
-  color: #e6e6e8;
-  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  border-left: 1px solid #2f3136;
-  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
-}
+   Three constraints shaped it:
 
+   1. Inherited properties cross shadow boundaries. Discord setting `font-family` or
+      `line-height` on <html> reaches our text, so .panel re-declares the inheritable
+      properties that would otherwise let the host page redesign us by accident.
+   2. The layout controller (layout.ts) owns the host's entire `style` attribute, so
+      nothing here may rely on inline styles and nothing else may write them. Geometry is
+      its job; everything visual lives below.
+   3. The panel is 300px wide docked on a laptop and can be 1200px expanded on a desktop.
+      Container queries on .panel — not media queries, which would measure the window —
+      collapse the tab labels and tighten the padding when it is actually narrow.
+
+   No `!important` anywhere: inside a shadow root our rules already win, and an
+   `!important` here would only fight the layout controller. */
+
+/* Closed = no geometry, no hit area. The layout controller never writes `display`, so this
+   rule is safe from being clobbered by the host's inline style. */
 :host([data-kibitz-state="closed"]) {
   display: none;
 }
@@ -28,99 +27,258 @@
   box-sizing: border-box;
 }
 
+[data-kibitz-root] {
+  height: 100%;
+}
+
 .panel {
+  container-type: inline-size;
+  /* Containing block for the resize grip, which is the only absolutely placed child. */
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
-  min-height: 0;
+  overflow: hidden;
+  border: 1px solid #26282d;
+  border-radius: inherit;
+  background: #16171a;
+  color: #e3e5e8;
+  /* Re-declared because inherited properties leak in from the page (see header). */
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  letter-spacing: normal;
+  text-align: left;
+  text-transform: none;
+  white-space: normal;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
 }
+
+/* ---------- header ---------- */
 
 .header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid #2f3136;
-  font-weight: 600;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  border-bottom: 1px solid #26282d;
+  background: #1b1c20;
+  /* The whole header is the drag surface; layout.ts binds to [data-kibitz-drag]. */
+  cursor: grab;
+  user-select: none;
 }
 
-.header .title {
-  flex: 1;
+.header:active {
+  cursor: grabbing;
+}
+
+.header button {
+  cursor: pointer;
+}
+
+.drag {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
 }
 
-.header .platform {
-  font-weight: 400;
-  color: #9a9ca3;
-  text-transform: capitalize;
+.title {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.platform {
+  color: #8b8f97;
+  font-size: 11px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  appearance: none;
+  border: 0;
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: transparent;
+  color: #9aa0a8;
+  font: inherit;
+  font-size: 12px;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.tab:hover,
+.tab:focus-visible {
+  background: #24262b;
+  color: #e3e5e8;
+  outline: none;
+}
+
+.tab.selected {
+  background: #2f3238;
+  color: #ffffff;
+}
+
+.tab-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.controls {
+  display: flex;
+  gap: 2px;
+  flex: 0 0 auto;
 }
 
 .icon-button {
   appearance: none;
   border: 0;
-  background: transparent;
-  color: #b5b7bd;
-  font: inherit;
-  font-size: 18px;
-  line-height: 1;
-  width: 28px;
-  height: 28px;
   border-radius: 6px;
-  cursor: pointer;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  color: #9aa0a8;
+  font: inherit;
+  font-size: 13px;
+  line-height: 24px;
+  text-align: center;
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
-.icon-button:hover {
-  background: #2c2e33;
-  color: #ffffff;
+.icon-button:hover,
+.icon-button:focus-visible {
+  background: #24262b;
+  color: #e3e5e8;
+  outline: none;
 }
+
+.icon-button.selected {
+  background: #33374a;
+  color: #c8ccff;
+}
+
+.icon-button.close:hover {
+  background: #4a2429;
+  color: #ffb3b3;
+}
+
+/* ---------- body / views ---------- */
+
+.body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.view {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 10px;
+}
+
+.view.settings {
+  overflow-y: auto;
+}
+
+/* ---------- the message being asked about ---------- */
 
 .card {
-  margin: 10px 12px 0;
-  padding: 10px 12px;
-  background: #232529;
-  border: 1px solid #2f3136;
+  flex: 0 0 auto;
+  border: 1px solid #26282d;
   border-radius: 8px;
-  font-size: 13px;
+  padding: 8px 10px;
+  background: #1b1c20;
 }
 
 .card .meta {
   display: flex;
-  gap: 8px;
   align-items: baseline;
-  color: #9a9ca3;
-  margin-bottom: 4px;
+  gap: 6px;
+  flex-wrap: wrap;
+  color: #8b8f97;
+  font-size: 11px;
 }
 
 .card .meta .author {
   color: #ffffff;
+  font-size: 13px;
   font-weight: 600;
 }
 
-.card .content {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  max-height: 140px;
-  overflow: auto;
+.card .meta .badge {
+  border-radius: 3px;
+  padding: 0 4px;
+  background: #5865f2;
+  color: #ffffff;
+  font-size: 10px;
+  text-transform: uppercase;
 }
 
-.card .extras {
+.card .meta .absolute {
+  color: #61656c;
+}
+
+.card .content {
+  margin-top: 4px;
+  max-height: 8.5em;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.card .chips {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
   margin-top: 6px;
-  color: #9a9ca3;
-  font-size: 12px;
+}
+
+.card .chip {
+  border: 1px solid #303339;
+  border-radius: 10px;
+  padding: 1px 7px;
+  color: #9aa0a8;
+  font-size: 11px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .card .reply {
-  color: #9a9ca3;
-  font-size: 12px;
   margin-bottom: 4px;
-  white-space: nowrap;
+  color: #8b8f97;
+  font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+/* ---------- conversation ---------- */
+
 .status {
-  margin: 12px;
-  color: #9a9ca3;
+  flex: 0 0 auto;
+  color: #9aa0a8;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .status.error {
@@ -128,75 +286,161 @@
 }
 
 .conversation {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 10px 12px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+  scrollbar-width: thin;
 }
 
 .turn {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  position: relative;
   border-radius: 8px;
-  padding: 8px 10px;
-  max-width: 100%;
+  padding: 7px 10px;
+  /* Long-form text stays readable when the panel is 1200px wide. */
+  max-width: min(100%, 78ch);
+  overflow-wrap: anywhere;
 }
 
 .turn.user {
   align-self: flex-end;
-  background: #3b4bb8;
+  background: #2f3238;
   color: #ffffff;
 }
 
 .turn.assistant {
-  align-self: stretch;
-  background: #232529;
-}
-
-.turn.assistant:empty::after {
-  content: "…";
-  color: #9a9ca3;
+  background: #1e2024;
+  border: 1px solid #26282d;
+  padding-right: 28px;
 }
 
 .turn.note {
   align-self: center;
-  color: #9a9ca3;
+  color: #8b8f97;
   font-size: 12px;
-  padding: 0;
 }
 
 .turn.error {
-  align-self: stretch;
-  background: #3a2426;
-  color: #f2b5b5;
-  font-size: 13px;
+  border: 1px solid #5a2b2b;
+  background: #241a1a;
+  color: #f0a3a3;
+  font-size: 12px;
+  white-space: pre-wrap;
 }
 
+.turn .dots {
+  color: #8b8f97;
+  letter-spacing: 2px;
+}
+
+.turn-action {
+  appearance: none;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #8b8f97;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 120ms ease, color 120ms ease;
+}
+
+.turn.assistant .turn-action {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+}
+
+.turn.error .turn-action {
+  display: block;
+  margin-top: 6px;
+  padding: 2px 6px;
+  color: #f0a3a3;
+}
+
+.turn-action:hover,
+.turn-action:focus-visible {
+  opacity: 1;
+  color: #e3e5e8;
+  outline: none;
+}
+
+/* Markdown produced by markdown.ts — text nodes only, never innerHTML. */
+
+.turn p {
+  margin: 0 0 6px;
+}
+
+.turn p:last-child {
+  margin-bottom: 0;
+}
+
+.turn code {
+  border-radius: 4px;
+  padding: 0 3px;
+  background: #101114;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.turn pre {
+  margin: 6px 0;
+  border: 1px solid #26282d;
+  border-radius: 6px;
+  padding: 8px;
+  background: #101114;
+  overflow-x: auto;
+}
+
+.turn pre code {
+  padding: 0;
+  background: transparent;
+  white-space: pre;
+}
+
+.turn a {
+  color: #8fa4ff;
+  text-decoration: underline;
+}
+
+/* ---------- call to action, toolbars, buttons ---------- */
+
 .cta {
-  margin: 12px;
-  padding: 12px;
-  background: #232529;
-  border: 1px dashed #4a4d55;
+  flex: 0 0 auto;
+  border: 1px solid #303339;
   border-radius: 8px;
+  padding: 10px;
+  background: #1b1c20;
 }
 
 .cta p {
   margin: 0 0 8px;
 }
 
+.cta code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .button {
   appearance: none;
   border: 0;
   border-radius: 6px;
-  padding: 6px 10px;
+  padding: 6px 12px;
+  background: #2f3238;
+  color: #e3e5e8;
   font: inherit;
   font-size: 13px;
   cursor: pointer;
-  background: #2c2e33;
-  color: #e6e6e8;
+  transition: background-color 120ms ease;
 }
 
 .button:hover {
@@ -217,39 +461,213 @@
   cursor: default;
 }
 
+.link {
+  appearance: none;
+  border: 0;
+  margin-left: 8px;
+  padding: 0;
+  background: transparent;
+  color: #8fa4ff;
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .toolbar {
   display: flex;
-  gap: 8px;
   align-items: center;
-  padding: 8px 12px;
-  border-top: 1px solid #2f3136;
-  font-size: 12px;
-  color: #9a9ca3;
+  gap: 8px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
 }
 
 .toolbar .spacer {
-  flex: 1;
+  flex: 1 1 auto;
 }
+
+.toolbar .scan-label {
+  color: #8b8f97;
+  font-size: 12px;
+}
+
+/* ---------- composer ---------- */
 
 .composer {
   display: flex;
+  align-items: flex-end;
   gap: 8px;
-  padding: 8px 12px 12px;
+  flex: 0 0 auto;
 }
 
 .composer textarea {
-  flex: 1;
-  resize: none;
-  min-height: 38px;
-  max-height: 120px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  border: 1px solid #2f3136;
-  background: #121316;
-  color: #e6e6e8;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 34px;
+  max-height: 160px;
+  border: 1px solid #303339;
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: #101114;
+  color: #e3e5e8;
   font: inherit;
+  resize: none;
+  overflow-y: auto;
 }
 
 .composer textarea:focus {
-  outline: 1px solid #4a5ad4;
+  border-color: #4a5ad4;
+  outline: none;
+}
+
+/* ---------- settings ---------- */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.field > span:first-child {
+  color: #9aa0a8;
+  font-size: 12px;
+}
+
+.field input,
+.field select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #303339;
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: #101114;
+  color: #e3e5e8;
+  font: inherit;
+  font-size: 13px;
+}
+
+.field input:focus,
+.field select:focus {
+  border-color: #4a5ad4;
+  outline: none;
+}
+
+.field small {
+  color: #71757c;
+  font-size: 11px;
+}
+
+.field .key-row {
+  display: flex;
+  gap: 6px;
+}
+
+.warning {
+  margin: 0;
+  border: 1px solid #5a4a1f;
+  border-left-width: 3px;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #221d10;
+  color: #e8d4a3;
+  font-size: 12px;
+}
+
+.warning code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* ---------- resize grip ---------- */
+
+.grip {
+  position: absolute;
+  background: transparent;
+  transition: background-color 120ms ease;
+}
+
+/* A dock resizes on the edge that faces the chat; a float resizes from its free corner.
+   LAYOUT_ATTR is written by the layout controller, which is why the grip can be one
+   element with three placements instead of three conditional elements. */
+:host([data-kibitz-layout="left"]) .grip {
+  top: 0;
+  right: 0;
+  width: 7px;
+  height: 100%;
+  cursor: ew-resize;
+  border-right: 2px solid transparent;
+}
+
+:host([data-kibitz-layout="right"]) .grip {
+  top: 0;
+  left: 0;
+  width: 7px;
+  height: 100%;
+  cursor: ew-resize;
+  border-left: 2px solid transparent;
+}
+
+:host([data-kibitz-layout="left"]) .grip:hover,
+:host([data-kibitz-layout="right"]) .grip:hover {
+  border-color: #4a5ad4;
+}
+
+:host([data-kibitz-layout="float"]) .grip {
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  /* Two diagonal strokes: the corner-grip affordance every OS uses. */
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent 0 3px,
+    #4a4e57 3px 4px,
+    transparent 4px 6px
+  );
+  border-bottom-right-radius: 8px;
+}
+
+:host([data-kibitz-layout="float"]) .grip:hover {
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent 0 3px,
+    #7d86ff 3px 4px,
+    transparent 4px 6px
+  );
+}
+
+/* ---------- narrow panel ---------- */
+
+@container (max-width: 380px) {
+  .tab-label {
+    display: none;
+  }
+
+  /* At 300px the header runs out of room and would clip "DISCORD" mid-word. */
+  .platform {
+    display: none;
+  }
+
+  .tab {
+    padding: 4px 6px;
+  }
+
+  .view {
+    padding: 8px;
+  }
+
+  .turn {
+    max-width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab,
+  .icon-button,
+  .button,
+  .turn-action,
+  .grip {
+    transition: none;
+  }
 }

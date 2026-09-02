@@ -156,3 +156,18 @@ button:disabled {
   border-radius: 6px;
   font-size: 0.9rem;
 }
+
+/*
+  Grant mode (options.html?grant=…) renders in a 460×340 popup, so the origin is the one
+  thing that must be unmissable: the user is being asked to approve exactly that address.
+*/
+.grant-origin {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--field-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.95rem;
+  overflow-wrap: anywhere;
+}
