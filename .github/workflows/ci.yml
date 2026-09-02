@@ -31,6 +31,8 @@ jobs:
       - run: npm run check
       - name: Pipeline script contract test (stubbed gh, no network)
         run: bash tests/scripts/upsert-issue.test.sh
+      - name: AGENTS.md structure (the fix agent reads it as ground truth)
+        run: bash tests/scripts/agents-ledger.test.sh
       - name: Extension self-test (fixture page, no account)
         timeout-minutes: 5
         run: npm run probe:selftest

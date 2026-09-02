@@ -577,6 +577,7 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   channel with a different list id, so the selector contract has no hole there. The only
   `data-list-id` values in a normal view are `guildsnav`, `private-channels-*` and
   `chat-messages`. → `list-root`'s error names this reading; §7.2 requires a text channel.
+- **2026-09-02 — Live verification competes with the developer using Discord.** Five live
   runs were defeated by channel switches, a channel with no chat scroller, and an open
   context menu whose transparent full-viewport backdrop covered every target. Electron
   refuses `Target.createTarget`, so a probe cannot open its own page. → Live checks against
