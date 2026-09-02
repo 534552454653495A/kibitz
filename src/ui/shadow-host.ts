@@ -22,7 +22,7 @@
  */
 
 const ISOLATED_EVENTS = [
-  // Keyboard and text input — the actual bug above.
+  // Keyboard and text input — the measured bug above. These are the load-bearing entries.
   "keydown",
   "keypress",
   "keyup",
@@ -31,12 +31,15 @@ const ISOLATED_EVENTS = [
   "compositionstart",
   "compositionupdate",
   "compositionend",
-  // Clipboard: Discord binds paste to its upload/attachment flow.
+  // Clipboard: Discord binds paste to its upload/attachment flow, so a paste into our
+  // composer would otherwise also open Discord's "upload this file?" modal.
   "paste",
   "copy",
   "cut",
-  // Pointer: a click inside our panel must not also be a click in the chat (focus steal,
-  // popouts closing, "mark as read" side effects).
+  // Pointer and drag: precautionary, not measured. Discord keeps document-level handlers
+  // for closing popouts, focus management and drag-and-drop; our own handlers run first
+  // (they are inside the shadow tree), so stopping these at the host costs us nothing and
+  // removes a class of surprises. Remove an entry here only with evidence, not by guess.
   "pointerdown",
   "pointerup",
   "mousedown",
@@ -44,10 +47,11 @@ const ISOLATED_EVENTS = [
   "click",
   "dblclick",
   "contextmenu",
-  // Scrolling our own panes must not scroll Discord's message list underneath.
-  "wheel",
-  // Selecting text in our UI must not start Discord's drag-and-drop.
   "dragstart",
+  // NOT `wheel`: scroll chaining is not propagation. When one of our scroll panes reaches
+  // its end the browser scrolls the nearest scrollable ancestor whether or not a listener
+  // called stopPropagation, so a wheel guard here would be a comment that lies. Containment
+  // belongs in CSS — `overscroll-behavior: contain` on our scroll panes (panel.css).
 ] as const;
 
 export interface ShadowHostOptions {

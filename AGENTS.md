@@ -135,15 +135,23 @@ Buttons and the panel are created **only** through `createShadowHost`
   "the user is typing outside an input", focuses its own message box and takes the
   keystrokes. Measured on Discord Stable (2026-09-02): typing `abc` into our composer left
   it empty and put `abc` in Discord's message box — the chat was unusable from day one.
-  `createShadowHost` therefore stops keyboard, clipboard, pointer and wheel events at the
+  `createShadowHost` therefore stops keyboard, clipboard and pointer events at the
   host in the **bubble** phase: our own handlers live inside the shadow tree and have
   already run, while `document` never sees the event. A capture-phase guard on `window`
   also blocks Discord but swallows our handlers too (measured: Enter inserted a newline
   instead of sending), which is why the guard is on the host and not on window.
+  `wheel` is deliberately **not** in that list: scroll chaining is not propagation, so a
+  wheel guard would not stop Discord's list from scrolling under a pane that hit its end —
+  `overscroll-behavior: contain` in `panel.css` does that.
 
 `mode: "open"` (not `closed`) so tests and the probe can drive the UI through
 `host.shadowRoot`. The probe's `panel-input` check types into a panel field on live Discord
 and fails if the text lands anywhere else — that is the regression guard.
+
+Never serialise settings by hand. `redactSettings` (`src/core/settings.ts`) is the only
+sanctioned way to put a configuration into a log, an error, a report or a diagnostic
+script: it rebuilds the object instead of pattern-matching text, so no formatting can carry
+the key through (see §12, 2026-09-02).
 
 ### 3.6 One file owns the Discord contract
 
@@ -519,3 +527,15 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   types into the panel on live Discord; settings moved into the panel (3.4 amendment).
   Rule that generalises: **a UI regression that only appears inside the host page must be
   caught by a live check, not by a jsdom test** — jsdom has no Discord.
+
+- **2026-09-02 — A diagnostic printed the owner's live API key into a session transcript.**
+  A throwaway script `cat`ed `settings.json` through a hand-written redaction regex
+  (`"apiKey":"[^"]*"`) that did not match the file's pretty-printed `"apiKey": "…"` spacing,
+  so the real OpenAI key was echoed in full — twice — and had to be revoked. The same script
+  was about to write a dummy key over that file; it only stopped because an unrelated
+  assertion failed first.
+  → `redactSettings` (`src/core/settings.ts`) is the only sanctioned formatter for a
+  configuration, and it rebuilds the object rather than matching text (§3.4).
+  Two rules that generalise: **never point a diagnostic at the user's real config file** —
+  copy it aside or run the companion with `--settings <temp>`; and **never assert on a
+  secret's value** — `hasKey`/`apiKeyLength` is all a check ever needs.

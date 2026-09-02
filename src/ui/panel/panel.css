@@ -195,6 +195,9 @@
 
 .view.settings {
   overflow-y: auto;
+  /* Reaching the end of our pane must not scroll Discord's message list: scroll
+     chaining ignores stopPropagation, so containment has to be declared here. */
+  overscroll-behavior: contain;
 }
 
 /* ---------- the message being asked about ---------- */
@@ -239,6 +242,9 @@
   margin-top: 4px;
   max-height: 8.5em;
   overflow-y: auto;
+  /* Reaching the end of our pane must not scroll Discord's message list: scroll
+     chaining ignores stopPropagation, so containment has to be declared here. */
+  overscroll-behavior: contain;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -292,6 +298,9 @@
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  /* Reaching the end of our pane must not scroll Discord's message list: scroll
+     chaining ignores stopPropagation, so containment has to be declared here. */
+  overscroll-behavior: contain;
   padding-right: 2px;
   scrollbar-width: thin;
 }
@@ -513,6 +522,9 @@
   font: inherit;
   resize: none;
   overflow-y: auto;
+  /* Reaching the end of our pane must not scroll Discord's message list: scroll
+     chaining ignores stopPropagation, so containment has to be declared here. */
+  overscroll-behavior: contain;
 }
 
 .composer textarea:focus {

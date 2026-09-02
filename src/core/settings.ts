@@ -102,3 +102,25 @@ export function originPattern(baseUrl: string): string {
   if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error(`unsupported protocol ${url.protocol}`);
   return `${url.origin}/*`;
 }
+
+/**
+ * The only sanctioned way to put a `Settings` value into a log line, an error message, a
+ * probe report or a diagnostic script.
+ *
+ * History (2026-09-02): a throwaway diagnostic printed `settings.json` with a hand-written
+ * redaction regex that did not match the pretty-printed `"apiKey": "…"` spacing, and the
+ * owner's live OpenAI key ended up in a session transcript and had to be revoked. Hand-rolled
+ * redaction is now forbidden: format through this function, which cannot be defeated by
+ * whitespace because it never sees text — it rebuilds the object.
+ */
+export interface RedactedSettings {
+  provider: ProviderId;
+  baseUrl: string;
+  model: string;
+  /** Length only: enough to tell "empty" from "pasted something" without revealing it. */
+  apiKeyLength: number;
+}
+
+export function redactSettings(settings: Settings): RedactedSettings {
+  return { provider: settings.provider, baseUrl: settings.baseUrl, model: settings.model, apiKeyLength: settings.apiKey.length };
+}

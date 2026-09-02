@@ -87,6 +87,18 @@ function renderedItemIds(page: Page): Promise<string[]> {
   return page.evaluate((sel: string) => Array.from(document.querySelectorAll(sel), (el) => el.id), MESSAGE_ITEM);
 }
 
+/**
+ * Text currently in Discord's own message box, or null when there is none (the fixture).
+ * `[role="textbox"][data-slate-editor]` is public markup, not a class name; the leading BOM
+ * Slate keeps in an empty editor is stripped so "empty" compares equal across reads.
+ */
+function discordDraft(page: Page): Promise<string | null> {
+  return page.evaluate(() => {
+    const box = document.querySelector('[role="textbox"][data-slate-editor="true"]');
+    return box === null ? null : (box.textContent ?? "").replace(/\uFEFF/g, "");
+  });
+}
+
 async function ensureHelper(ctx: ProbeContext): Promise<void> {
   const present = await ctx.page.evaluate(() => window.__kibitzProbe !== undefined);
   if (!present) await ctx.page.evaluate(`${ctx.helperCode}\nKibitzProbeHelper.installProbeHelper();`);
@@ -322,9 +334,16 @@ export const CHECKS: ProbeCheck[] = [
     /**
      * The regression this defends shipped once: Shadow DOM retargets our events, Discord's
      * global key handling saw them as "typing outside an input", focused its own message box
-     * and swallowed everything typed into Kibitz. The settings view's base-URL field is used
-     * rather than the chat composer because the composer only exists once a key is configured
-     * and the probe never configures one.
+     * and swallowed everything typed into Kibitz — a user's prompt could end up posted to the
+     * channel. The settings view's base-URL field is used rather than the chat composer
+     * because the composer only exists once a key is configured and the probe never
+     * configures one.
+     *
+     * The leak assertion compares Discord's message box BEFORE and AFTER typing, and must
+     * stay that way: that box holds a per-channel draft that survives reloads, so asserting
+     * it is empty would fail forever on any probe channel that ever held one — filing
+     * `auto:broken-selector` and sending the fix agent after a selector that never broke.
+     * A delta still catches a real leak and is immune to whatever the channel already had.
      */
     async run({ page }) {
       const settingsTab: ElementHandle | null = await page.$(`[${PANEL_HOST_ATTR}] >>> [${ACTION_ATTR}="view-settings"]`);
@@ -337,28 +356,25 @@ export const CHECKS: ProbeCheck[] = [
         10_000,
         () => page.$(`[${PANEL_HOST_ATTR}] >>> input[type="url"]`),
       );
+      // `null` on the fixture, which has no message box; a string (often "") on live Discord.
+      const draftBefore = await discordDraft(page);
       await field.click();
       const probeText = "/kibitz-probe";
       await page.keyboard.type(probeText, { delay: 15 });
-      const seen = await page.evaluate(
-        (hostAttr: string) => {
-          const root = document.querySelector(`[${hostAttr}]`)?.shadowRoot ?? null;
-          const input = root?.querySelector('input[type="url"]');
-          const discordBox = document.querySelector('[role="textbox"][data-slate-editor="true"]');
-          return {
-            ours: input instanceof HTMLInputElement ? input.value : null,
-            // Present only on live Discord; the fixture has no message box.
-            discord: discordBox ? (discordBox.textContent ?? "").replace(/\uFEFF/g, "") : null,
-          };
-        },
-        PANEL_HOST_ATTR,
-      );
+      const ours = await page.evaluate((hostAttr: string) => {
+        const input = document.querySelector(`[${hostAttr}]`)?.shadowRoot?.querySelector('input[type="url"]');
+        return input instanceof HTMLInputElement ? input.value : null;
+      }, PANEL_HOST_ATTR);
+      const draftAfter = await discordDraft(page);
       await field.dispose();
-      if (seen.ours === null || !seen.ours.endsWith(probeText)) {
-        throw new Error(`typing did not reach the panel field: value=${JSON.stringify(seen.ours)} discordBox=${JSON.stringify(seen.discord)}`);
+
+      if (ours === null || !ours.endsWith(probeText)) {
+        throw new Error(`typing did not reach the panel field: value=${JSON.stringify(ours)} discordDraft=${JSON.stringify(draftAfter)}`);
       }
-      if (seen.discord !== null && seen.discord.length > 0) {
-        throw new Error(`keystrokes leaked into Discord's message box: ${JSON.stringify(seen.discord.slice(0, 60))}`);
+      if (draftAfter !== draftBefore) {
+        throw new Error(
+          `keystrokes leaked into Discord's message box: draft went from ${JSON.stringify(draftBefore?.slice(0, 40))} to ${JSON.stringify(draftAfter?.slice(0, 40))}`,
+        );
       }
 
       // Leave the panel on the chat view: scroll-back drives the chat toolbar.
@@ -366,7 +382,7 @@ export const CHECKS: ProbeCheck[] = [
       if (!chatTab) throw new Error(`no [${ACTION_ATTR}="view-chat"] to return to`);
       await chatTab.click();
       await chatTab.dispose();
-      return `typed ${probeText.length} chars into the panel; Discord's box ${seen.discord === null ? "absent (fixture)" : "stayed empty"}`;
+      return `typed ${probeText.length} chars into the panel; Discord's draft ${draftBefore === null ? "absent (fixture)" : `unchanged (${draftBefore.length} chars)`}`;
     },
   },
   {
