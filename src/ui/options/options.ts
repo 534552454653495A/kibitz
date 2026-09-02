@@ -1,7 +1,7 @@
 /**
- * Options page logic: provider/base URL/key/model form, host-permission grant, and a
- * "Test" round-trip through the real chat Port. Also the extension's grant surface: opened
- * as `options.html?grant=<pattern>` it shows one button and nothing else.
+ * Options page logic: provider/base URL/key/model/image-policy form, host-permission grant,
+ * and a "Test" round-trip through the real chat Port. Also the extension's grant surface:
+ * opened as `options.html?grant=<pattern>` it shows one button and nothing else.
  *
  * The one non-obvious decision is in both grant paths: `permissions.request` is called
  * synchronously, before the first `await`, because Chrome only honours the request while
@@ -31,6 +31,7 @@ const els = {
   baseUrl: requireElement<HTMLInputElement>("base-url"),
   apiKey: requireElement<HTMLInputElement>("api-key"),
   model: requireElement<HTMLInputElement>("model"),
+  sendImages: requireElement<HTMLInputElement>("send-images"),
   save: requireElement<HTMLButtonElement>("save"),
   test: requireElement<HTMLButtonElement>("test"),
   permission: requireElement<HTMLSpanElement>("permission"),
@@ -106,7 +107,7 @@ function readForm(): { settings: Settings; pattern: string } | null {
     els.model.focus();
     return null;
   }
-  return { settings: { provider: selectedProvider(), baseUrl, apiKey, model }, pattern };
+  return { settings: { provider: selectedProvider(), baseUrl, apiKey, model, sendImages: els.sendImages.checked }, pattern };
 }
 
 function onSave(event: SubmitEvent): void {
@@ -224,6 +225,7 @@ async function init(): Promise<void> {
     els.baseUrl.value = saved.baseUrl;
     els.apiKey.value = saved.apiKey;
     els.model.value = saved.model;
+    els.sendImages.checked = saved.sendImages;
   }
   applyProvider(currentProvider, null);
   await refreshPermission();

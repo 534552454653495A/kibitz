@@ -23,7 +23,18 @@ function authorLabel(m: UniversalMessage): string {
   return label;
 }
 
-export function serializeMessage(m: UniversalMessage): string {
+export interface SerializeMessageOptions {
+  /**
+   * Ids of image attachments that travel with this request as real pictures. They are
+   * named rather than linked: told a URL, a model describes the link ("an image called
+   * cat.png is attached") instead of the picture it can already see, and a model without
+   * vision would try to reason about the filename. Everything else keeps its URL, which
+   * is all the user can do with it too.
+   */
+  attachedImageIds?: ReadonlySet<string>;
+}
+
+export function serializeMessage(m: UniversalMessage, opts: SerializeMessageOptions = {}): string {
   const lines: string[] = [`[${m.createdAt}] ${authorLabel(m)}: ${m.content}`];
   if (m.editedAt !== undefined) lines.push(`${INDENT}(edited ${m.editedAt})`);
 
@@ -34,7 +45,11 @@ export function serializeMessage(m: UniversalMessage): string {
   }
 
   for (const a of m.attachments) {
-    lines.push(`${INDENT}[attachment: ${a.kind} ${a.name} ${a.url}]`);
+    lines.push(
+      opts.attachedImageIds?.has(a.id) === true
+        ? `${INDENT}[image attached to this request: ${a.name}]`
+        : `${INDENT}[attachment: ${a.kind} ${a.name} ${a.url}]`,
+    );
   }
 
   for (const e of m.embeds) {
@@ -57,7 +72,7 @@ export function serializeMessage(m: UniversalMessage): string {
   return lines.join("\n");
 }
 
-export interface SerializeThreadOptions {
+export interface SerializeThreadOptions extends SerializeMessageOptions {
   /** Upper bound on the returned text length; the anchor always survives trimming. */
   charBudget: number;
 }
@@ -74,7 +89,7 @@ export function serializeThread(t: UniversalThread, opts: SerializeThreadOptions
   const messages = orderedMessages(t);
   const anchorIndex = messages.findIndex((m) => m.id === t.anchor.id);
   const blocks = messages.map((m, i) => {
-    const text = serializeMessage(m);
+    const text = serializeMessage(m, opts);
     return i === anchorIndex ? ANCHOR_MARK + text : text;
   });
 

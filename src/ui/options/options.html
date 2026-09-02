@@ -1,6 +1,6 @@
 <!doctype html>
 <!--
-  Kibitz settings page. Plain HTML + options.ts: it is a four-field form, and a framework
+  Kibitz settings page. Plain HTML + options.ts: it is a short form, and a framework
   would be more code than the form. Element ids are the contract options.ts binds to.
 
   Two views live in one page. The second (#grant-view, shown when the URL carries ?grant=)
@@ -50,6 +50,16 @@
 
           <label for="model">Model</label>
           <input id="model" type="text" spellcheck="false" placeholder="gpt-4o-mini" />
+
+          <label class="check" for="send-images">
+            <input id="send-images" type="checkbox" checked />
+            <span>Send images to the model</span>
+          </label>
+          <p class="hint">
+            Image attachments on a message are sent to the API you configured above, as a link
+            to Discord's CDN. Needs a vision-capable model; turn it off if yours has no vision
+            or you would rather not share the picture.
+          </p>
 
           <div class="actions">
             <button type="submit" id="save">Save</button>

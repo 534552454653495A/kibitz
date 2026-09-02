@@ -151,18 +151,38 @@ describe("extension shell one-shot requests", () => {
     await expect(createExtensionShell().loadSettings()).resolves.toBeNull();
 
     fakeRuntime.reply["load-settings"] = {
-      draft: { provider: "anthropic", baseUrl: "https://api.anthropic.com", model: "m", hasKey: true },
+      draft: { provider: "anthropic", baseUrl: "https://api.anthropic.com", model: "m", hasKey: true, sendImages: false },
     };
     await expect(createExtensionShell().loadSettings()).resolves.toEqual({
       provider: "anthropic",
       baseUrl: "https://api.anthropic.com",
       model: "m",
       hasKey: true,
+      sendImages: false,
     });
   });
 
   it("throws instead of handing the settings view a draft with an unknown provider", async () => {
-    fakeRuntime.reply["load-settings"] = { draft: { provider: "gemini", baseUrl: "https://x.test", model: "m", hasKey: true } };
+    fakeRuntime.reply["load-settings"] = {
+      draft: { provider: "gemini", baseUrl: "https://x.test", model: "m", hasKey: true, sendImages: true },
+    };
+    await expect(createExtensionShell().loadSettings()).rejects.toThrow(/malformed settings draft/);
+  });
+
+  // A service worker from before the image toggle answers without the field. The panel may
+  // already have been reloaded (extensions update the page and the worker independently),
+  // and refusing the draft would replace the whole settings form with "malformed draft".
+  it("accepts a draft with no sendImages and shows the toggle as on rather than rejecting it", async () => {
+    fakeRuntime.reply["load-settings"] = {
+      draft: { provider: "anthropic", baseUrl: "https://api.anthropic.com", model: "m", hasKey: true },
+    };
+    await expect(createExtensionShell().loadSettings()).resolves.toMatchObject({ sendImages: true });
+  });
+
+  it("rejects a draft whose sendImages is not a boolean instead of guessing a policy", async () => {
+    fakeRuntime.reply["load-settings"] = {
+      draft: { provider: "anthropic", baseUrl: "https://api.anthropic.com", model: "m", hasKey: true, sendImages: "yes" },
+    };
     await expect(createExtensionShell().loadSettings()).rejects.toThrow(/malformed settings draft/);
   });
 
@@ -177,7 +197,13 @@ describe("extension shell one-shot requests", () => {
       error: "Settings saved. Chrome must approve access to https://api.openai.com/* before Kibitz can use it.",
       grantOrigin: "https://api.openai.com/*",
     };
-    const input = { provider: "openai-compatible" as const, baseUrl: "https://api.openai.com/v1", model: "gpt", apiKey: "sk-1" };
+    const input = {
+      provider: "openai-compatible" as const,
+      baseUrl: "https://api.openai.com/v1",
+      model: "gpt",
+      apiKey: "sk-1",
+      sendImages: true,
+    };
     await expect(createExtensionShell().saveSettings(input)).resolves.toEqual({
       ok: false,
       error: "Settings saved. Chrome must approve access to https://api.openai.com/* before Kibitz can use it.",
@@ -189,7 +215,7 @@ describe("extension shell one-shot requests", () => {
   it("throws when a save reply is neither ok:true nor an error message", async () => {
     fakeRuntime.reply["save-settings"] = { ok: false };
     await expect(
-      createExtensionShell().saveSettings({ provider: "anthropic", baseUrl: "https://a.test", model: "m", apiKey: "" }),
+      createExtensionShell().saveSettings({ provider: "anthropic", baseUrl: "https://a.test", model: "m", apiKey: "", sendImages: true }),
     ).rejects.toThrow(/malformed save result/);
   });
 

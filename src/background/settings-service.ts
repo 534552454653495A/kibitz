@@ -22,7 +22,13 @@ const UI_STATE_KEY = "uiState";
 export async function loadDraft(): Promise<SettingsDraftMessage | null> {
   const settings = await loadSettings();
   if (settings === null) return null;
-  return { provider: settings.provider, baseUrl: settings.baseUrl, model: settings.model, hasKey: settings.apiKey.length > 0 };
+  return {
+    provider: settings.provider,
+    baseUrl: settings.baseUrl,
+    model: settings.model,
+    hasKey: settings.apiKey.length > 0,
+    sendImages: settings.sendImages,
+  };
 }
 
 export async function saveDraft(input: SettingsInputMessage): Promise<SaveSettingsMessage> {

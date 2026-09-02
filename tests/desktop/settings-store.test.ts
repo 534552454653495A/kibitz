@@ -5,7 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadFileSettings, saveFileSettings, settingsPath } from "../../desktop/settings-store";
 import type { Settings } from "../../src/core/settings";
 
-const SETTINGS: Settings = { provider: "openai-compatible", baseUrl: "https://example.test/v1", apiKey: "sk-1", model: "m" };
+const SETTINGS: Settings = {
+  provider: "openai-compatible",
+  baseUrl: "https://example.test/v1",
+  apiKey: "sk-1",
+  model: "m",
+  sendImages: true,
+};
 
 let dir: string;
 beforeEach(async () => {

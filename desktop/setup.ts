@@ -83,7 +83,9 @@ export async function runSetup(file: string = settingsPath()): Promise<void> {
     const model = await prompter.ask("Model", keepPreset ? existing.model : preset.model);
 
     const apiKey = typedKey === KEEP_KEY && existing !== null ? existing.apiKey : typedKey;
-    const settings = parseSettings({ provider, baseUrl, apiKey, model });
+    // The wizard does not ask about images (it is a terminal, and the panel owns that
+    // checkbox), so it must carry the stored choice forward instead of re-defaulting it to on.
+    const settings = parseSettings({ provider, baseUrl, apiKey, model, sendImages: existing?.sendImages });
     if (settings === null) {
       console.log("These values do not form a usable configuration (is the base URL an http(s) URL?). Nothing saved.");
       process.exitCode = 2;

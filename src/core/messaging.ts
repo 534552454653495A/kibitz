@@ -8,15 +8,31 @@
  *
  * The background is a dumb relay: it receives fully built chat messages and streams the
  * provider's answer back. Prompt construction stays in core/prompt.ts (pure, testable).
+ *
+ * Images ride *alongside* `content` rather than turning `content` into a text-or-parts
+ * union: every consumer — the panel's transcript, the stored history, the prompt builders,
+ * the follow-up appender — already reads `content` as "the text of this turn", and a union
+ * would force all of them to narrow for a case only the two provider clients care about.
+ * The providers are the single place that knows how to put a picture on the wire.
  */
 
 export const CHAT_PORT_NAME = "kibitz-chat";
 
 export type ChatRole = "system" | "user" | "assistant";
 
+export interface ChatImage {
+  /** Absolute http(s) URL, or a `data:` URL when bytes are inlined. */
+  url: string;
+  /** Original filename, for the text part and for logs. Never sent as a wire field. */
+  name?: string;
+  mimeType?: string;
+}
+
 export interface ChatMessage {
   role: ChatRole;
   content: string;
+  /** Only meaningful on a user turn; providers ignore images on any other role. */
+  images?: ChatImage[];
 }
 
 export interface ChatRequest {
@@ -70,6 +86,8 @@ export interface SettingsInputMessage {
   model: string;
   /** Empty = keep the stored key. */
   apiKey: string;
+  /** Absent in drafts written before the field existed; absence means "on". */
+  sendImages?: boolean;
 }
 
 export interface SettingsStatus {
@@ -84,6 +102,8 @@ export interface SettingsDraftMessage {
   baseUrl: string;
   model: string;
   hasKey: boolean;
+  /** Always present outbound: the host resolved the stored value (or its default) already. */
+  sendImages: boolean;
 }
 
 export type SaveSettingsMessage = { ok: true } | { ok: false; error: string; grantOrigin?: string };

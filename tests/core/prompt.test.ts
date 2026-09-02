@@ -3,10 +3,15 @@ import {
   appendFollowUp,
   buildExplainMessages,
   buildSynthesisMessages,
+  MAX_IMAGES_PER_REQUEST,
   renderTemplate,
 } from "../../src/core/prompt";
 import type { ChatMessage } from "../../src/core/messaging";
-import type { UniversalMessage } from "../../src/core/types";
+import type { UniversalAttachment, UniversalMessage } from "../../src/core/types";
+
+function image(id: string, extra: Partial<UniversalAttachment> = {}): UniversalAttachment {
+  return { id, kind: "image", name: `${id}.png`, url: `https://cdn/${id}.png`, mimeType: "image/png", ...extra };
+}
 
 const message: UniversalMessage = {
   platform: "discord",
@@ -47,6 +52,34 @@ describe("buildExplainMessages", () => {
     expect(out[1]?.content).toContain("Zeynep");
     expect(out[1]?.content).toContain("bu ne demek ya {{weird}}");
   });
+
+  it("sends the resized previewUrl when the adapter offered one, so the user is not billed for a full-size photo", () => {
+    const out = buildExplainMessages({
+      ...message,
+      attachments: [image("a", { previewUrl: "https://media/a.png?width=1024" }), image("b")],
+    });
+    expect(out[1]?.images).toEqual([
+      { url: "https://media/a.png?width=1024", name: "a.png", mimeType: "image/png" },
+      { url: "https://cdn/b.png", name: "b.png", mimeType: "image/png" },
+    ]);
+  });
+
+  it("leaves images undefined when the message has none, so a text-only turn stays text-only", () => {
+    expect(buildExplainMessages(message)[1]?.images).toBeUndefined();
+    const withFile: UniversalMessage = {
+      ...message,
+      attachments: [{ id: "f", kind: "file", name: "notes.pdf", url: "https://cdn/notes.pdf" }],
+    };
+    expect(buildExplainMessages(withFile)[1]?.images).toBeUndefined();
+  });
+
+  it("caps the images at MAX_IMAGES_PER_REQUEST and leaves the dropped ones as URLs in the text", () => {
+    const attachments = ["a", "b", "c", "d", "e"].map((id) => image(id));
+    const out = buildExplainMessages({ ...message, attachments });
+    expect(out[1]?.images).toHaveLength(MAX_IMAGES_PER_REQUEST);
+    expect(out[1]?.content).toContain("[image attached to this request: a.png]");
+    expect(out[1]?.content).toContain("[attachment: image e.png https://cdn/e.png]");
+  });
 });
 
 describe("buildSynthesisMessages", () => {
@@ -56,6 +89,53 @@ describe("buildSynthesisMessages", () => {
     expect(out.map((m) => m.role)).toEqual(["system", "user"]);
     expect(out[1]?.content).toContain("cevap burada");
     expect(out[1]?.content).toContain(">>> [2026-01-01T00:00:00.000Z] Zeynep");
+  });
+
+  it("sends the anchor's images first: the clicked message is what the question is about", () => {
+    const anchor: UniversalMessage = { ...message, attachments: [image("anchor1"), image("anchor2")] };
+    const other: UniversalMessage = {
+      ...message,
+      id: "43",
+      createdAt: "2026-01-01T00:00:01.000Z",
+      attachments: [image("other1")],
+    };
+    const out = buildSynthesisMessages({ anchor, messages: [other, anchor], truncated: false });
+    expect(out[1]?.images?.map((i) => i.name)).toEqual(["anchor1.png", "anchor2.png", "other1.png"]);
+  });
+
+  it("takes at most one image per surrounding message so one image dump cannot fill the request", () => {
+    const anchor: UniversalMessage = { ...message, attachments: [image("anchor1")] };
+    const dump: UniversalMessage = {
+      ...message,
+      id: "43",
+      createdAt: "2026-01-01T00:00:01.000Z",
+      attachments: [image("d1"), image("d2"), image("d3"), image("d4")],
+    };
+    const late: UniversalMessage = {
+      ...message,
+      id: "44",
+      createdAt: "2026-01-01T00:00:02.000Z",
+      attachments: [image("late1")],
+    };
+    const out = buildSynthesisMessages({ anchor, messages: [anchor, dump, late], truncated: false });
+    expect(out[1]?.images?.map((i) => i.name)).toEqual(["anchor1.png", "d1.png", "late1.png"]);
+    // d2..d4 were not sent, so the thread text must still hand the reader their URLs.
+    expect(out[1]?.content).toContain("[attachment: image d2.png https://cdn/d2.png]");
+  });
+
+  it("never exceeds MAX_IMAGES_PER_REQUEST even when the anchor alone carries more", () => {
+    const anchor: UniversalMessage = {
+      ...message,
+      attachments: ["a", "b", "c", "d", "e", "f"].map((id) => image(id)),
+    };
+    const other: UniversalMessage = { ...message, id: "43", createdAt: "2026-01-01T00:00:01.000Z", attachments: [image("z")] };
+    const out = buildSynthesisMessages({ anchor, messages: [anchor, other], truncated: false });
+    expect(out[1]?.images).toHaveLength(MAX_IMAGES_PER_REQUEST);
+    expect(out[1]?.images?.some((i) => i.name === "z.png")).toBe(false);
+  });
+
+  it("leaves images undefined when nothing in the thread has one", () => {
+    expect(buildSynthesisMessages({ anchor: message, messages: [message], truncated: false })[1]?.images).toBeUndefined();
   });
 });
 

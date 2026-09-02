@@ -7,8 +7,13 @@
  * close the connection after the last chunk. Failing a fully received answer because a
  * sentinel was missing would punish the user for a server quirk, so EOF after any data
  * counts as completion; EOF with no data at all is still a protocol error.
+ *
+ * Multimodal turns: `content` becomes an array of parts only when a user turn actually
+ * carries images. Text-only requests keep the plain-string form because several
+ * "compatible" servers (older llama.cpp/LM Studio builds) only implement that one, and
+ * churning the wire format for every request would break them for no gain.
  */
-import type { ChatMessage } from "../../core/messaging";
+import type { ChatMessage, ChatRole } from "../../core/messaging";
 import { isRecord } from "../../core/validate";
 import { parseSse } from "./sse";
 import { parseStreamJson, ProviderStreamError, requireBody, throwIfNotOk, type LlmProvider } from "./types";
@@ -30,6 +35,32 @@ function deltaText(payload: string): string | null {
   return typeof content === "string" && content.length > 0 ? content : null;
 }
 
+interface OpenAiImagePart {
+  type: "image_url";
+  /** `detail` is optional and omitted: letting the server pick avoids paying for tiles nobody asked for. */
+  image_url: { url: string };
+}
+
+interface OpenAiTurn {
+  role: ChatRole;
+  content: string | Array<OpenAiImagePart | { type: "text"; text: string }>;
+}
+
+function toOpenAiTurns(messages: ChatMessage[]): OpenAiTurn[] {
+  return messages.map((message) => {
+    // Images belong to the user's own turn; a system or assistant turn never carries one.
+    const images = message.role === "user" ? message.images : undefined;
+    if (images === undefined || images.length === 0) return { role: message.role, content: message.content };
+    return {
+      role: message.role,
+      content: [
+        ...images.map((image): OpenAiImagePart => ({ type: "image_url", image_url: { url: image.url } })),
+        { type: "text" as const, text: message.content },
+      ],
+    };
+  });
+}
+
 export function createOpenAiCompatibleProvider(options: OpenAiCompatibleOptions): LlmProvider {
   // Users paste base URLs with and without a trailing slash; both must produce one "/".
   const endpoint = `${options.baseUrl.replace(/\/+$/, "")}/chat/completions`;
@@ -41,7 +72,7 @@ export function createOpenAiCompatibleProvider(options: OpenAiCompatibleOptions)
           "content-type": "application/json",
           authorization: `Bearer ${options.apiKey}`,
         },
-        body: JSON.stringify({ model: options.model, messages, stream: true }),
+        body: JSON.stringify({ model: options.model, messages: toOpenAiTurns(messages), stream: true }),
         signal,
       });
       await throwIfNotOk(response);

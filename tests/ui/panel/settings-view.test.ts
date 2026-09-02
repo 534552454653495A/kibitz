@@ -36,6 +36,7 @@ const DRAFT: SettingsDraft = {
   baseUrl: PROVIDER_PRESETS["openai-compatible"].baseUrl,
   model: PROVIDER_PRESETS["openai-compatible"].model,
   hasKey: true,
+  sendImages: true,
 };
 
 let container: HTMLElement;
@@ -116,6 +117,7 @@ describe("settings view", () => {
       baseUrl: "https://proxy.local/v1",
       model: PROVIDER_PRESETS["openai-compatible"].model,
       apiKey: "",
+      sendImages: true,
     });
   });
 
@@ -162,5 +164,29 @@ describe("settings view", () => {
     show({ settings: { busy: true } });
     expect(act("save-settings").hasAttribute("disabled")).toBe(true);
     expect(act("test-settings").hasAttribute("disabled")).toBe(true);
+  });
+
+  // The checkbox is the only way to turn image sending off from inside Discord, so it has to
+  // show the stored policy and travel with the save — not silently re-enable it.
+  it("shows the stored image policy instead of always starting ticked", () => {
+    show({ settings: { draft: { ...DRAFT, sendImages: false } } });
+    expect(field('input[type="checkbox"]').checked).toBe(false);
+  });
+
+  it("submits sendImages:false once the user unticks the box", async () => {
+    show();
+    const box = field('input[type="checkbox"]');
+    box.checked = false;
+    box.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(field('input[type="checkbox"]').checked).toBe(false));
+
+    act("save-settings").click();
+
+    expect(actions.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ sendImages: false }));
+  });
+
+  it("starts ticked when no draft has arrived, matching how an unset configuration parses", () => {
+    show({ settings: { draft: null } });
+    expect(field('input[type="checkbox"]').checked).toBe(true);
   });
 });

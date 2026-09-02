@@ -25,16 +25,28 @@ export function readDraft(reply: Record<string, unknown>, host: string): Setting
   const draft = reply.draft;
   if (draft === null) return null;
   const provider = isRecord(draft) ? providerId(draft.provider) : null;
+  // `sendImages` is deliberately not required: a service worker or companion that predates
+  // the image toggle answers without it, and a panel that has already been reloaded must
+  // still get a usable form instead of "malformed draft". Absent reads as on, matching
+  // `parseSettings`. A present non-boolean is a protocol bug and fails with the rest.
+  const sendImages: unknown = isRecord(draft) ? draft.sendImages : undefined;
   if (
     !isRecord(draft) ||
     provider === null ||
     typeof draft.baseUrl !== "string" ||
     typeof draft.model !== "string" ||
-    typeof draft.hasKey !== "boolean"
+    typeof draft.hasKey !== "boolean" ||
+    (sendImages !== undefined && typeof sendImages !== "boolean")
   ) {
     throw new Error(`${host} returned a malformed settings draft`);
   }
-  return { provider, baseUrl: draft.baseUrl, model: draft.model, hasKey: draft.hasKey };
+  return {
+    provider,
+    baseUrl: draft.baseUrl,
+    model: draft.model,
+    hasKey: draft.hasKey,
+    sendImages: sendImages ?? true,
+  };
 }
 
 export function readSaveResult(reply: Record<string, unknown>, host: string): SaveSettingsResult {

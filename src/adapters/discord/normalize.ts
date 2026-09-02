@@ -21,6 +21,7 @@ import { ContractError, assertUniversalMessage, isRecord } from "../../core/vali
 import {
   CONTENT_MARKUP,
   permalink,
+  previewUrlFor,
   USER_MESSAGE_TYPES,
   type RawDiscordChannel,
   type RawDiscordMessage,
@@ -90,11 +91,15 @@ function normalizeAttachments(raw: RawDiscordMessage["attachments"]): UniversalA
     // An attachment without a URL is not something the LLM or the user can open; skip it.
     if (!a.id || !url) continue;
     const prefix = a.content_type?.split("/")[0] ?? "";
+    const kind = ATTACHMENT_KIND_BY_MIME_PREFIX[prefix] ?? "file";
+    // Only images are ever sent to a vision model, so only images get a resized preview.
+    const previewUrl = kind === "image" ? previewUrlFor(url, a.proxy_url) : undefined;
     out.push({
       id: a.id,
-      kind: ATTACHMENT_KIND_BY_MIME_PREFIX[prefix] ?? "file",
+      kind,
       name: a.filename ?? "",
       url,
+      ...(previewUrl === undefined ? {} : { previewUrl }),
       ...(a.content_type ? { mimeType: a.content_type } : {}),
       ...(typeof a.size === "number" ? { sizeBytes: a.size } : {}),
     });

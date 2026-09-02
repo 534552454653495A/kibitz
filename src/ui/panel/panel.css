@@ -575,6 +575,27 @@
   gap: 6px;
 }
 
+/*
+  A checkbox belongs beside its words, so this row opts out of the stacked-field rules
+  above: `.field input { width: 100% }` would blow the box up to the pane's width, and
+  `.field > span:first-child` would grey out the sentence that names what is being toggled.
+  Hence `span.check-row` and not `.check-row`: it has to match that rule's specificity to
+  beat it, and it wins only because it comes later in this file.
+*/
+.field span.check-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #e3e5e8;
+  font-size: 13px;
+}
+
+.field .check-row input[type="checkbox"] {
+  width: auto;
+  padding: 0;
+  accent-color: #4a5ad4;
+}
+
 .warning {
   margin: 0;
   border: 1px solid #5a4a1f;

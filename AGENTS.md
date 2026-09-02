@@ -584,3 +584,23 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   a shared window prove only what they observe; the scheduled probe (dedicated throwaway
   account, nobody driving) is the authority, and `failureKind` exists so a disturbed run
   never wakes the fix agent.
+- **2026-09-02 — Images are sent as URLs, not bytes (owner's request).** The model answered
+  "I cannot read the image" because an attachment reached it only as the text line
+  `[attachment: image shot.png <url>]`. Verified formats before writing anything: OpenAI
+  **Chat Completions** takes `{type:"image_url",image_url:{url}}` where the url may be
+  http(s) or a `data:` URL; Anthropic Messages takes `{type:"image",source:{type:"url",url}}`
+  and its docs prefer images **before** the text block. Both now receive the picture, images
+  first, and only on `user` turns.
+  Decisions: pass the CDN URL through rather than downloading bytes — the provider fetches
+  it, which keeps the extension free of a `cdn.discordapp.com` host permission, and the
+  request goes out while Discord's signed link is still fresh. The cost is that the provider
+  sees a Discord link, which the README states plainly. Discord's `media.discordapp.net`
+  mirror is used with `format=webp&width=1024&height=1024` (what Discord's own client asks
+  for) because a smaller image is fewer tokens of the user's money; the `ex`/`is`/`hm`
+  signature parameters must survive that rewrite or the link 404s. Cap: four images per
+  request, the anchored message's first.
+  The `sendImages` setting is enforced **provider-side** (`applyImagePolicy`, called by the
+  service worker and the companion) rather than in the panel: the panel never sees
+  `Settings`, and honouring it there would have meant a new `Shell` method for one boolean.
+  A stored configuration without the field reads as **on**, or the feature would look like
+  it never shipped.

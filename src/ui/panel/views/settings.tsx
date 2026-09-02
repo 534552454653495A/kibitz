@@ -9,6 +9,9 @@
  *     the user to find their key again;
  *   - preset switching is a *suggestion*: it fills a field only when the field is empty or
  *     still holds the previous preset's value, so a hand-tuned URL is never overwritten;
+ *   - the image toggle starts on when no draft has arrived yet, because that is what a
+ *     configuration written before the field existed parses as; a checkbox that flashed
+ *     "off" and then corrected itself would read as the setting having been lost;
  *   - on the desktop host the panel shares Discord's window, so the key is typed into a
  *     page Discord's own JS can read. That is a real risk and is stated in the UI rather
  *     than hidden behind a capability flag.
@@ -27,6 +30,7 @@ function SettingsView({ ctx }: { ctx: PanelContext }) {
   const [baseUrl, setBaseUrl] = useState(draft?.baseUrl ?? PROVIDER_PRESETS["openai-compatible"].baseUrl);
   const [model, setModel] = useState(draft?.model ?? PROVIDER_PRESETS["openai-compatible"].model);
   const [apiKey, setApiKey] = useState("");
+  const [sendImages, setSendImages] = useState(draft?.sendImages ?? true);
   const [revealed, setRevealed] = useState(false);
 
   // The initial state above already carries whatever draft existed at mount, so the effect
@@ -42,6 +46,7 @@ function SettingsView({ ctx }: { ctx: PanelContext }) {
     setProvider(draft.provider);
     setBaseUrl(draft.baseUrl);
     setModel(draft.model);
+    setSendImages(draft.sendImages);
     // A key that was just saved must not linger in the DOM; the placeholder takes over.
     if (draft.hasKey) setApiKey("");
   }, [draft]);
@@ -118,12 +123,23 @@ function SettingsView({ ctx }: { ctx: PanelContext }) {
         <input type="text" value={model} spellcheck={false} onInput={(e) => setModel(e.currentTarget.value)} />
       </label>
 
+      <label class="field">
+        <span class="check-row">
+          <input type="checkbox" checked={sendImages} onChange={(event) => setSendImages(event.currentTarget.checked)} />
+          <span>Send images to the model</span>
+        </span>
+        <small>
+          Image attachments are sent to the API above as a link to Discord's CDN. Needs a
+          vision-capable model.
+        </small>
+      </label>
+
       <div class="toolbar">
         <button
           class="button primary"
           {...{ [ACTION_ATTR]: "save-settings" }}
           disabled={busy}
-          onClick={() => void actions.saveSettings({ provider, baseUrl, model, apiKey })}
+          onClick={() => void actions.saveSettings({ provider, baseUrl, model, apiKey, sendImages })}
         >
           Save
         </button>

@@ -11,6 +11,7 @@ describe("redactSettings", () => {
     baseUrl: "https://api.openai.com/v1",
     apiKey: "sk-proj-SHOULD-NEVER-APPEAR",
     model: "gpt-4o-mini",
+    sendImages: false,
   };
 
   it("keeps no trace of the key in any serialisation of the result", () => {
@@ -30,6 +31,7 @@ describe("redactSettings", () => {
       provider: "openai-compatible",
       baseUrl: "https://api.openai.com/v1",
       model: "gpt-4o-mini",
+      sendImages: false,
       apiKeyLength: settings.apiKey.length,
     });
   });

@@ -5,20 +5,37 @@ import type { ChatMessage } from "../../src/core/messaging";
 import type { Settings } from "../../src/core/settings";
 import type { DesktopDelivery } from "../../src/shell/desktop-protocol";
 
-// The provider is the network; the handler's contract is what it does around it.
+// The provider is the network; the handler's contract is what it does around it — including
+// exactly which messages it hands over, which is the only place the image policy is visible.
 const stub = vi.hoisted(() => ({
   stream: (_messages: ChatMessage[], _signal: AbortSignal): AsyncIterable<string> => (async function* () {})(),
   created: 0,
+  received: [] as ChatMessage[][],
 }));
 vi.mock("../../src/background/providers/index", () => ({
   createProvider: () => {
     stub.created += 1;
-    return { stream: stub.stream };
+    return {
+      stream: (messages: ChatMessage[], signal: AbortSignal) => {
+        stub.received.push(messages);
+        return stub.stream(messages, signal);
+      },
+    };
   },
 }));
 
-const SETTINGS: Settings = { provider: "anthropic", baseUrl: "https://example.test", apiKey: "sk-very-secret", model: "m" };
+const SETTINGS: Settings = {
+  provider: "anthropic",
+  baseUrl: "https://example.test",
+  apiKey: "sk-very-secret",
+  model: "m",
+  sendImages: true,
+};
 const MESSAGES: ChatMessage[] = [{ role: "user", content: "hi" }];
+const WITH_IMAGE: ChatMessage[] = [
+  { role: "system", content: "rules" },
+  { role: "user", content: "explain", images: [{ url: "https://cdn.discordapp.test/shot.png", name: "shot.png" }] },
+];
 
 async function* yields(...chunks: string[]): AsyncGenerator<string> {
   for (const chunk of chunks) yield chunk;
@@ -81,6 +98,7 @@ function harness(settings: Settings | null): Harness {
 beforeEach(() => {
   stub.created = 0;
   stub.stream = () => yields();
+  stub.received = [];
 });
 
 describe("chat", () => {
@@ -154,6 +172,26 @@ describe("chat", () => {
     const ends = await Promise.all([h.terminal("a"), h.terminal("b")]);
     expect(ends.map((d) => d.type === "error" && d.code)).toEqual(["aborted", "aborted"]);
   });
+
+  // Failure mode defended: the companion re-reads settings on every chat, so it is the last
+  // place that can honour the toggle. If it forwarded `images` anyway, unticking the box in
+  // the panel would change nothing and a Discord CDN link would still reach the provider.
+  it("hands the provider no images at all when sendImages is off", async () => {
+    const h = harness({ ...SETTINGS, sendImages: false });
+    await h.handler.handle(JSON.stringify({ type: "chat", requestId: "i1", messages: WITH_IMAGE }));
+    await h.terminal("i1");
+    expect(stub.received[0]).toEqual([
+      { role: "system", content: "rules" },
+      { role: "user", content: "explain" },
+    ]);
+  });
+
+  it("hands the provider the images unchanged when sendImages is on", async () => {
+    const h = harness(SETTINGS);
+    await h.handler.handle(JSON.stringify({ type: "chat", requestId: "i2", messages: WITH_IMAGE }));
+    await h.terminal("i2");
+    expect(stub.received[0]).toEqual(WITH_IMAGE);
+  });
 });
 
 describe("control requests", () => {
@@ -180,7 +218,9 @@ describe("settings requests", () => {
   it("load-settings hands back the draft with hasKey instead of the key itself", async () => {
     const h = harness(SETTINGS);
     const json = await h.handler.handle(JSON.stringify({ type: "load-settings" }));
-    expect(JSON.parse(json)).toEqual({ draft: { provider: "anthropic", baseUrl: "https://example.test", model: "m", hasKey: true } });
+    expect(JSON.parse(json)).toEqual({
+      draft: { provider: "anthropic", baseUrl: "https://example.test", model: "m", hasKey: true, sendImages: true },
+    });
     expect(json).not.toContain(SETTINGS.apiKey);
   });
 
@@ -194,6 +234,13 @@ describe("settings requests", () => {
     const input = { provider: "anthropic", baseUrl: "https://example.test", model: "claude-next", apiKey: "" };
     expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-settings", input })))).toEqual({ ok: true });
     expect(h.written.settings).toEqual({ ...SETTINGS, model: "claude-next" });
+  });
+
+  it("save-settings writes sendImages:false through to settings.json", async () => {
+    const h = harness(SETTINGS);
+    const input = { provider: "anthropic", baseUrl: "https://example.test", model: "m", apiKey: "", sendImages: false };
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-settings", input })))).toEqual({ ok: true });
+    expect(h.written.settings).toEqual({ ...SETTINGS, sendImages: false });
   });
 
   it("save-settings refuses and writes nothing when neither a typed nor a stored key exists", async () => {

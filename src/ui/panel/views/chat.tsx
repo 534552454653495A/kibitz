@@ -40,7 +40,14 @@ function relativeTime(iso: string, now: number): string {
 
 function MessageCard({ message }: { message: UniversalMessage }) {
   const chips: string[] = [];
-  for (const attachment of message.attachments) chips.push(`${attachment.kind}: ${attachment.name}`);
+  // Images are called out separately from the rest: with the image toggle on they are the
+  // one attachment kind whose *content* leaves for the provider, so a user glancing at the
+  // card should be able to see how many pictures this question will carry.
+  const images = message.attachments.filter((attachment) => attachment.kind === "image");
+  if (images.length > 0) chips.push(`${images.length} image${images.length === 1 ? "" : "s"}`);
+  for (const attachment of message.attachments) {
+    if (attachment.kind !== "image") chips.push(`${attachment.kind}: ${attachment.name}`);
+  }
   for (const embed of message.embeds) chips.push(embed.provider ?? embed.title ?? "embed");
   if (message.isSystem) chips.push("system notice");
   if (message.editedAt !== undefined) chips.push("edited");

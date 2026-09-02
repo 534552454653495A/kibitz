@@ -31,6 +31,7 @@ const STORED: Settings = {
   baseUrl: "https://api.openai.com/v1",
   apiKey: "sk-stored",
   model: "gpt-4o-mini",
+  sendImages: true,
 };
 
 const stored = (): Settings | undefined => fakeChrome.store.settings as Settings | undefined;
@@ -44,7 +45,13 @@ describe("loadDraft", () => {
   it("never puts the stored key in the draft the panel receives", async () => {
     fakeChrome.store.settings = STORED;
     const draft = await loadDraft();
-    expect(draft).toEqual({ provider: "openai-compatible", baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini", hasKey: true });
+    expect(draft).toEqual({
+      provider: "openai-compatible",
+      baseUrl: "https://api.openai.com/v1",
+      model: "gpt-4o-mini",
+      hasKey: true,
+      sendImages: true,
+    });
     expect(JSON.stringify(draft)).not.toContain("sk-stored");
   });
 
@@ -52,6 +59,15 @@ describe("loadDraft", () => {
     expect(await loadDraft()).toBeNull();
     fakeChrome.store.settings = { ...STORED, apiKey: "" };
     expect(await loadDraft()).toBeNull();
+  });
+
+  // The panel's checkbox is seeded from this draft, so a stored `false` that never makes it
+  // back would show a ticked box over a configuration that is not sending images.
+  it("reports a stored sendImages:false to the panel without ever reporting the key", async () => {
+    fakeChrome.store.settings = { ...STORED, sendImages: false };
+    const draft = await loadDraft();
+    expect(draft).toMatchObject({ sendImages: false, hasKey: true });
+    expect(JSON.stringify(draft)).not.toContain("sk-stored");
   });
 });
 
@@ -62,6 +78,30 @@ describe("saveDraft", () => {
     const result = await saveDraft({ provider: "openai-compatible", baseUrl: STORED.baseUrl, model: "gpt-5", apiKey: "" });
     expect(result).toEqual({ ok: true });
     expect(stored()).toEqual({ ...STORED, model: "gpt-5" });
+  });
+
+  // The panel is the only surface that can turn the toggle off in the extension; if the
+  // service worker dropped the field, the box would come back ticked on the next open and
+  // images would keep going out.
+  it("persists sendImages:false when the user unticks the box", async () => {
+    fakeChrome.store.settings = STORED;
+    fakeChrome.granted = ["https://api.openai.com/*"];
+    const result = await saveDraft({
+      provider: "openai-compatible",
+      baseUrl: STORED.baseUrl,
+      model: STORED.model,
+      apiKey: "",
+      sendImages: false,
+    });
+    expect(result).toEqual({ ok: true });
+    expect(stored()).toEqual({ ...STORED, sendImages: false });
+  });
+
+  it("keeps a stored sendImages:false when a save omits the field, instead of re-enabling it", async () => {
+    fakeChrome.store.settings = { ...STORED, sendImages: false };
+    fakeChrome.granted = ["https://api.openai.com/*"];
+    await saveDraft({ provider: "openai-compatible", baseUrl: STORED.baseUrl, model: STORED.model, apiKey: "" });
+    expect(stored()?.sendImages).toBe(false);
   });
 
   it("refuses and stores nothing when no key is typed and none is stored", async () => {
@@ -98,7 +138,13 @@ describe("saveDraft", () => {
       error: "Settings saved. Chrome must approve access to https://api.anthropic.com/* before Kibitz can use it.",
       grantOrigin: "https://api.anthropic.com/*",
     });
-    expect(stored()).toEqual({ provider: "anthropic", baseUrl: "https://api.anthropic.com", apiKey: "sk-new", model: "claude" });
+    expect(stored()).toEqual({
+      provider: "anthropic",
+      baseUrl: "https://api.anthropic.com",
+      apiKey: "sk-new",
+      model: "claude",
+      sendImages: true,
+    });
   });
 });
 

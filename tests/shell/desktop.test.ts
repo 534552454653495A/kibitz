@@ -190,7 +190,7 @@ describe("desktop shell settings and ui state", () => {
 
   it("sends the draft as a save-settings request and surfaces the companion's refusal", async () => {
     companion.reply["save-settings"] = { ok: false, error: "An API key is required." };
-    const input = { provider: "anthropic" as const, baseUrl: "https://a.test", model: "m", apiKey: "" };
+    const input = { provider: "anthropic" as const, baseUrl: "https://a.test", model: "m", apiKey: "", sendImages: false };
     await expect(createDesktopShell().saveSettings(input)).resolves.toEqual({ ok: false, error: "An API key is required." });
     expect(companion.requests).toEqual([{ type: "save-settings", input }]);
   });

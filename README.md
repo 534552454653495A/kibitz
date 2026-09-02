@@ -24,7 +24,8 @@ knowingly. Do not use it on an account you cannot afford to lose.
 **Your messages go to your AI provider.** When you click ✦, the message (and, if you scan,
 the surrounding messages) is sent from your browser to the API you configured — OpenAI,
 Anthropic, OpenRouter, a local Ollama, whatever you chose. Nothing is sent anywhere else.
-Read your provider's data policy.
+Image attachments go too, as a Discord CDN link your provider then fetches — see
+[Images](#images) for what that means and how to turn it off. Read your provider's data policy.
 
 **Your API key is your money.** It is stored in `chrome.storage.local` on this machine only
 (never `storage.sync`, so it is never uploaded to your Google account) and is used only by
@@ -99,6 +100,7 @@ page, no extension options screen (that still exists as a fallback).
 | **Base URL** | e.g. `https://api.openai.com/v1`, `https://openrouter.ai/api/v1`, `http://localhost:11434/v1`, `https://api.anthropic.com` |
 | **API key** | Stored locally only; the field shows `••••` and never displays a stored key again. Leave it empty when editing other fields. For Ollama any non-empty string works. |
 | **Model** | e.g. `gpt-4o-mini`, `claude-sonnet-4-5`, `llama3.1` |
+| **Send images to the model** | On by default. Sends image attachments to your provider so it can describe them; needs a vision-capable model. See [Images](#images) below. |
 
 **Save** persists immediately. In the extension, Chrome must then approve the one origin you
 typed (Kibitz ships with zero host access): the panel shows **Grant access**, which opens a
@@ -127,6 +129,22 @@ of the two you are in.
    move a floating panel (or drag a dock away from its edge to set it loose; drop it near an
    edge to re-dock), drag the grip to resize. Your layout is remembered per host.
 6. `Esc` or ✕ closes the panel.
+
+### Images
+
+When the message you asked about has an image attached, Kibitz sends the picture to the API
+you configured, alongside the text. That needs a **vision-capable model** — `gpt-4o-mini`,
+`claude-sonnet-4-5` and most hosted models qualify; a small local model usually does not and
+will answer with an error instead. Images cost noticeably more tokens than the text around
+them, and Kibitz sends at most four per request.
+
+What is actually sent is **Discord's CDN link to the image, not a copy of the bytes**. Your
+provider fetches that link, so the provider sees it (and sees that you are reading Discord).
+The link is signed and expires, but it is a real Discord URL.
+
+Turn it off in the **Settings** tab (or the options page) with **Send images to the model**;
+attachments then travel as a text line naming the file and nothing is fetched. Existing
+configurations that predate this setting read as *on*.
 
 ### Troubleshooting
 
