@@ -559,15 +559,24 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
 - **2026-09-02 — Known, unmeasured: the trailing ✦ could fall under Discord's hover
   toolbar.** The button is inline at the end of the message text; Discord's per-message
   action toolbar is absolutely positioned at the top-right of the row. Measured live at
-  1920px: the toolbar's left edge sits at x≈1378 while the content column ends at x≈1605,
-  so there is a **≈227px danger zone** at the right end of the column. Six hovered samples
-  were all clear (✦ at x=473–713, nowhere near it) and no message in any observed channel
-  ended inside the zone, so the case is neither reproduced nor excluded. It would look like
-  "the ✦ on long single-line messages does not respond". If it is reported, the hypothesis
-  is ready: check the hit test while hovering such a message before changing placement, and
-  prefer raising the host (`position: relative` + `z-index`) over moving the button, because
-  block placement changes every message's layout.
-- **2026-09-02 — Live verification competes with the developer using Discord.** Five live
+  1920px: the toolbar's left edge sat at x≈1378 while the content column ended at x≈1605,
+  so there is a **≈227px danger zone** at the right end of the column, and the widest
+  observed message ended at x≈1554 — inside it. Eight hovered samples were nonetheless
+  clear (their ✦ sat at x=473–713 because those messages wrap), so the case is neither
+  reproduced nor excluded. It would look like "the ✦ on long single-line messages does not
+  respond".
+  Still to measure before choosing a fix, because two attempts failed to re-acquire the
+  toolbar element (ARIA-label search matched nothing; hit-testing the row's top-right found
+  only a live-region label): whether the toolbar is portaled out of its `li` and which
+  ancestor forms its stacking context. Raising the host with `z-index` only works if the
+  toolbar shares our stacking context — do not reach for it before that measurement, and
+  prefer it over block placement, which changes every message's layout.
+- **2026-09-02 — A channel with no message list is usually a voice channel.** A channel the
+  probe (and the injector) found empty of `[data-list-id="chat-messages"]` turned out from
+  its sidebar entry to be the voice channel the developer was connected to — not a text
+  channel with a different list id, so the selector contract has no hole there. The only
+  `data-list-id` values in a normal view are `guildsnav`, `private-channels-*` and
+  `chat-messages`. → `list-root`'s error names this reading; §7.2 requires a text channel.
   runs were defeated by channel switches, a channel with no chat scroller, and an open
   context menu whose transparent full-viewport backdrop covered every target. Electron
   refuses `Target.createTarget`, so a probe cannot open its own page. → Live checks against
