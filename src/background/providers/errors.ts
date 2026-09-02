@@ -26,8 +26,23 @@ export interface ClassifiedError {
  */
 const IMAGE_REJECTION = /image|vision|multimodal|modalit/i;
 
+/**
+ * A different image failure with the same status: the provider accepted the request and
+ * then could not GET the link. Measured 2026-09-02: a signed Discord attachment URL is
+ * fetchable anonymously (200, and our media-proxy rewrite returns a 40 KiB webp), so a
+ * hosted provider normally can — but a self-hosted server may have no route to the
+ * internet, and some (LM Studio) never fetch URLs at all and want inline bytes. The two
+ * cases need different advice, so they get different sentences.
+ */
+const IMAGE_FETCH_FAILURE = /(download|fetch|retriev|timed? ?out|unreachable|could not (?:get|load)).{0,40}(image|url)|(image|url).{0,40}(download|fetch|retriev|timed? ?out|unreachable)/i;
+
 const IMAGE_HINT =
   ' This model may not accept images; turn off "Send images" in settings to send text only.';
+
+const IMAGE_FETCH_HINT =
+  " The provider could not fetch the image link. Discord's attachment URLs are public but" +
+  " expire, and a self-hosted server may have no internet access or may not fetch URLs at" +
+  ' all — turn off "Send images" in settings to send text only.';
 
 export function classifyError(err: unknown, aborted: boolean): ClassifiedError {
   // The abort check comes first: an aborted fetch may surface as AbortError, as a
@@ -37,6 +52,7 @@ export function classifyError(err: unknown, aborted: boolean): ClassifiedError {
   }
   if (err instanceof ProviderHttpError) {
     const message = `HTTP ${err.status}: ${err.bodyExcerpt}`;
+    if (IMAGE_FETCH_FAILURE.test(err.bodyExcerpt)) return { code: "http", message: message + IMAGE_FETCH_HINT };
     return { code: "http", message: IMAGE_REJECTION.test(err.bodyExcerpt) ? message + IMAGE_HINT : message };
   }
   if (err instanceof ProviderStreamError) return { code: "provider", message: err.message };

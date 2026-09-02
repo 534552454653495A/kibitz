@@ -604,3 +604,18 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   `Settings`, and honouring it there would have meant a new `Shell` method for one boolean.
   A stored configuration without the field reads as **on**, or the feature would look like
   it never shipped.
+- **2026-09-02 — The URL-passing assumption was measured, and its gap named.** URL-passing
+  rests on "a provider's server can GET a signed Discord attachment link", which nothing had
+  tested. Measured with an anonymous Node fetch — no cookies, no session, exactly what a
+  provider has: `cdn.discordapp.com/…?ex&is&hm` → 200 `image/png` 290 KiB, `proxy_url` → 200
+  `image/webp` 115 KiB, and our `previewUrlFor` rewrite → 200 `image/webp` **40 KiB**. So the
+  links are public and the rewrite is 7× cheaper while keeping the signature valid; that also
+  validated `previewUrlFor` against the real CDN, which its string-level unit tests cannot.
+  Still unproven and deliberately not claimed: that a **specific** provider's fetcher
+  succeeds. A self-hosted server may have no route to the internet, and some (LM Studio)
+  never fetch URLs at all — they want inline bytes. That failure now has its own sentence in
+  `providers/errors.ts`, separate from "your model has no vision", because the remedies
+  differ. If it turns out to matter, the fix is to inline bytes as a `data:` URL (OpenAI) /
+  `source:{type:"base64"}` (Anthropic); the companion can fetch them freely, while the
+  extension would need a host permission for `media.discordapp.net` or a fetch performed in
+  the page — which is why it was not built on speculation.

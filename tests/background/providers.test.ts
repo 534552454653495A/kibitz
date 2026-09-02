@@ -276,4 +276,21 @@ describe("classifyError image hint", () => {
   it("does not hijack a cancelled request whose body happened to mention vision", () => {
     expect(classifyError(new ProviderHttpError(400, "vision not supported"), true).code).toBe("aborted");
   });
+
+  it("distinguishes a provider that could not fetch the link from one that refuses images", () => {
+    // Same status, opposite remedy: one means "your model has no vision", the other means
+    // "your server could not reach Discord's CDN". Measured 2026-09-02: those links are
+    // publicly fetchable, so this only happens on a server without internet or one that
+    // never fetches URLs.
+    const fetchFailure = classifyError(
+      new ProviderHttpError(400, '{"error":{"message":"Error while downloading image from url"}}'),
+      false,
+    );
+    expect(fetchFailure.message).toContain("could not fetch the image link");
+    expect(fetchFailure.message).not.toContain("may not accept images");
+
+    const refusal = classifyError(new ProviderHttpError(400, '{"error":{"message":"model does not support vision"}}'), false);
+    expect(refusal.message).toContain("may not accept images");
+    expect(refusal.message).not.toContain("could not fetch the image link");
+  });
 });
