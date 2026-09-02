@@ -40,6 +40,9 @@ jobs:
     concurrency:
       group: canary-probe-${{ github.ref }}-${{ matrix.branch }}
       cancel-in-progress: false
+    env:
+      # "true"/"false" string; evaluated here because `secrets` is legal in env values only.
+      HAS_PROBE_SECRETS: ${{ secrets.DISCORD_PROBE_TOKEN != '' && secrets.DISCORD_PROBE_CHANNEL != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -55,16 +58,17 @@ jobs:
       - run: npm run build
       - name: Probe ${{ matrix.branch }}
         # Until the two DISCORD_* secrets exist the probe cannot log in; skipping (green,
-        # with a notice) beats a red run every 6 hours that files nothing. `secrets` is
-        # readable in step-level `if`, not job-level, hence the gate lives here.
-        if: ${{ secrets.DISCORD_PROBE_TOKEN != '' && secrets.DISCORD_PROBE_CHANNEL != '' }}
+        # with a notice) beats a red run every 6 hours that files nothing. The `secrets`
+        # context is not readable in any `if` (job or step) — the workflow fails to LOAD —
+        # but it is readable in `env:` values, so the job env carries the verdict.
+        if: env.HAS_PROBE_SECRETS == 'true'
         timeout-minutes: 15
         env:
           DISCORD_PROBE_TOKEN: ${{ secrets.DISCORD_PROBE_TOKEN }}
           DISCORD_PROBE_CHANNEL: ${{ secrets.DISCORD_PROBE_CHANNEL }}
         run: npm run probe -- --branch ${{ matrix.branch }}
       - name: Not configured
-        if: ${{ secrets.DISCORD_PROBE_TOKEN == '' || secrets.DISCORD_PROBE_CHANNEL == '' }}
+        if: env.HAS_PROBE_SECRETS != 'true'
         run: echo "::notice::DISCORD_PROBE_TOKEN / DISCORD_PROBE_CHANNEL not set; live probe skipped (see README 'Secrets to configure')"
       - uses: actions/upload-artifact@v4
         if: always()
