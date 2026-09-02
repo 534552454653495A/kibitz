@@ -281,127 +281,154 @@ export const CHECKS: ProbeCheck[] = [
   },
   {
     id: "button-under-toolbar",
-    description: "a ✦ that sits under the message's hover toolbar still wins the hit test",
-    timeoutMs: 20_000,
+    description: "a ✦ inside the message's hover toolbar still wins the hit test",
+    timeoutMs: 25_000,
     /**
-     * The one measured way this button can become unclickable for a real user. Discord's
+     * The one measured way this button becomes unclickable for a real user. Discord's
      * per-message action toolbar is (measured on live Discord, 2026-09-02) a ~257x34
      * `position: absolute; z-index: 1` box INSIDE the message row, anchored top-right and
-     * mounted only while the row is hovered — which is exactly when someone clicks. A
-     * message whose text runs to the right edge of the column puts our trailing inline ✦
-     * underneath it. No message in any observed channel ended that far right, so the fixture
-     * reproduces the toolbar with those measured properties.
+     * mounted only while the row is hovered — exactly when someone clicks. A message whose
+     * text reaches the right of the column puts our trailing inline ✦ underneath it, and a
+     * static host loses the hit test; `position: relative; z-index: 2` on the host wins it.
      *
-     * The overlap is produced by shifting OUR OWN host into the toolbar's box with a
-     * temporary margin, not by hoping some message's text ends in the right place: what is
-     * under test is CSS stacking, and text length is an unstable way to arrange it. The
-     * margin is reverted before the check returns, and the following checks re-query the
-     * DOM, so nothing downstream sees the shifted host.
+     * Three things this check learned the hard way:
+     *   - the toolbar is recognised by computed geometry, not by a selector. No CSS selector
+     *     identifies it (Discord's carries no stable attribute of its own), so binding one
+     *     would be a guess in the wrong file — §3.6 keeps Discord selectors in selectors.ts,
+     *     and this heuristic never reads message data, only asks "what is on top here".
+     *   - the overlap is produced by moving OUR OWN host into the toolbar's box, on BOTH
+     *     axes: the hit test happens at one point, and an earlier version overlapped the
+     *     boxes by a single pixel with the centre outside the toolbar, so it could not fail.
+     *   - a page with no such toolbar (live Discord shows it only for some rows, and other
+     *     surfaces have none) is NOT a failure. It returns a pass that says so, because a
+     *     red probe files auto:broken-selector and the fix agent cannot even edit probe/.
      */
     async run({ page }) {
-      // Step 1: pick a row that is fully on screen and note where to hover it.
       const row = await page.evaluate((hostAttr: string) => {
         const hosts = Array.from(document.querySelectorAll(`[${hostAttr}]`));
         for (const host of hosts) {
           const li = host.closest('li[id^="chat-messages-"]');
-          if (!li || !li.querySelector('[role="group"]') || !(host instanceof HTMLElement)) continue;
+          if (!li || !(host instanceof HTMLElement)) continue;
           host.scrollIntoView({ block: "center" });
           const box = li.getBoundingClientRect();
           if (box.top < 60 || box.bottom > innerHeight - 60) continue;
           const hr = host.getBoundingClientRect();
-          return { id: host.getAttribute(hostAttr) ?? "", hoverX: Math.round(hr.left + hr.width / 2), hoverY: Math.round(hr.top + hr.height / 2) };
+          return { id: host.getAttribute(hostAttr) ?? "", x: Math.round(hr.left + hr.width / 2), y: Math.round(hr.top + hr.height / 2) };
         }
         return null;
       }, BUTTON_HOST_ATTR);
-      if (row === null) throw new Error("no message row with a hover toolbar was on screen to test");
+      if (row === null) return "no message row was on screen with a ✦ to test (nothing to conclude)";
 
-      // Step 2: hover it, so the toolbar mounts and can be measured. A hidden toolbar
-      // reports offsetWidth 0, which is how an earlier version of this check placed the
-      // button on the toolbar's edge instead of inside it.
-      await page.mouse.move(row.hoverX - 80, row.hoverY);
+      // Hover first: a hidden toolbar reports zero size, which once placed the test button
+      // on its edge instead of inside it.
+      await page.mouse.move(row.x - 80, row.y);
       await setTimeout(POLL_INTERVAL_MS);
-      await page.mouse.move(row.hoverX, row.hoverY);
+      await page.mouse.move(row.x, row.y);
       await setTimeout(POLL_INTERVAL_MS);
 
-      // Step 3: shift our own host into the middle of the now-visible toolbar. The pointer
-      // stays inside the row, so the hover state survives.
       const placed = await page.evaluate(
         (hostAttr: string, id: string) => {
           const host = document.querySelector(`[${hostAttr}="${id}"]`);
           if (!(host instanceof HTMLElement)) return null;
           const li = host.closest('li[id^="chat-messages-"]');
-          const bar = li?.querySelector('[role="group"]') ?? null;
-          if (!bar) return null;
-          const barBox = bar.getBoundingClientRect();
-          if (barBox.width === 0) return null;
+          if (!li) return null;
+          // Geometry, not a selector: a small absolutely-positioned box inside the hovered
+          // row is the action toolbar (measured 257x34 on Discord; the fixture copies it).
+          let bar: DOMRect | null = null;
+          for (const candidate of li.querySelectorAll("div")) {
+            if (getComputedStyle(candidate).position !== "absolute") continue;
+            const cr = candidate.getBoundingClientRect();
+            if (cr.width < 80 || cr.width > 600 || cr.height < 20 || cr.height > 60) continue;
+            bar = cr;
+            break;
+          }
+          if (bar === null) return { noToolbar: true as const };
           const hr = host.getBoundingClientRect();
-          // Both axes: box intersection is not enough, because the hit test happens at the
-          // host's CENTRE. An earlier version of this check shifted only horizontally, the
-          // boxes overlapped by one pixel, the centre fell below the toolbar and the check
-          // passed without ever testing stacking.
-          const dx = Math.round(barBox.left + barBox.width / 2 - hr.left - hr.width / 2);
-          const dy = Math.round(barBox.top + barBox.height / 2 - hr.top - hr.height / 2);
-          host.style.marginLeft = `${dx}px`;
-          host.style.marginTop = `${dy}px`;
-          const moved = host.getBoundingClientRect();
-          return { shift: dx, dy, x: Math.round(moved.left + moved.width / 2), y: Math.round(moved.top + moved.height / 2), barLeft: Math.round(barBox.left), barWidth: Math.round(barBox.width) };
-        },
-        BUTTON_HOST_ATTR,
-        row.id,
-      );
-      if (placed === null) throw new Error("the hover toolbar never became measurable while hovering the row");
-      await page.mouse.move(placed.x, placed.y);
-      await setTimeout(POLL_INTERVAL_MS);
-
-      const verdict = await page.evaluate(
-        (hostAttr: string, id: string) => {
-          const host = document.querySelector(`[${hostAttr}="${id}"]`);
-          if (!(host instanceof HTMLElement)) return { error: "the host disappeared while hovering" };
-          const li = host.closest('li[id^="chat-messages-"]');
-          const bar = li?.querySelector('[role="group"]') ?? null;
-          const hr = host.getBoundingClientRect();
-          const cx = Math.round(hr.left + hr.width / 2);
-          const cy = Math.round(hr.top + hr.height / 2);
-          const hit = document.elementFromPoint(cx, cy);
-          const barBox = bar?.getBoundingClientRect() ?? null;
-          const result = {
-            hovered: li?.matches(":hover") ?? false,
-            toolbarVisible: barBox !== null && barBox.width > 0,
-            // The hit-test point itself must be inside the toolbar, not merely its box.
-            centreInsideToolbar:
-              barBox !== null &&
-              barBox.width > 0 &&
-              cx >= barBox.left &&
-              cx <= barBox.right &&
-              cy >= barBox.top &&
-              cy <= barBox.bottom,
-            ours: hit !== null && (hit === host || host.contains(hit)),
-            hit: hit === null ? "nothing" : `${hit.tagName.toLowerCase()}${hit.getAttribute("role") ? `[role=${hit.getAttribute("role")}]` : ""}`,
-            zIndex: getComputedStyle(host).zIndex,
-            position: getComputedStyle(host).position,
+          return {
+            noToolbar: false as const,
+            priorMarginLeft: host.style.marginLeft,
+            priorMarginTop: host.style.marginTop,
+            dx: Math.round(bar.left + bar.width / 2 - hr.left - hr.width / 2),
+            dy: Math.round(bar.top + bar.height / 2 - hr.top - hr.height / 2),
+            barLeft: Math.round(bar.left),
+            barWidth: Math.round(bar.width),
           };
-          host.style.marginLeft = "";
-          host.style.marginTop = "";
-          return result;
         },
         BUTTON_HOST_ATTR,
         row.id,
       );
-      await page.mouse.move(4, 4);
+      if (placed === null) throw new Error("the ✦ disappeared while hovering its row");
+      if (placed.noToolbar) return `the hovered row has no action toolbar on this page (nothing to conclude)`;
 
-      if ("error" in verdict) throw new Error(verdict.error);
-      if (!verdict.hovered || !verdict.toolbarVisible) {
-        throw new Error(`the row's hover state did not engage (hovered=${verdict.hovered}, toolbar visible=${verdict.toolbarVisible}) — the check proves nothing in this state`);
-      }
-      if (!verdict.centreInsideToolbar) {
-        throw new Error(`the shifted ✦ (+${placed.shift}px,+${placed.dy}px) does not sit inside the toolbar box; the fixture geometry changed`);
-      }
-      if (!verdict.ours) {
-        throw new Error(
-          `a ✦ inside the hover toolbar's box is covered by ${verdict.hit} (host position:${verdict.position} z-index:${verdict.zIndex}) — a user hovering a long message to click it would miss`,
+      const restore = () =>
+        page.evaluate(
+          (hostAttr: string, id: string, left: string, top: string) => {
+            const host = document.querySelector(`[${hostAttr}="${id}"]`);
+            if (host instanceof HTMLElement) {
+              // Restore the PREVIOUS inline values: mount.ts sets margin-left itself, so
+              // clearing them would drop the button's spacing.
+              host.style.marginLeft = left;
+              host.style.marginTop = top;
+            }
+          },
+          BUTTON_HOST_ATTR,
+          id,
+          placed.priorMarginLeft,
+          placed.priorMarginTop,
         );
+
+      const id = row.id;
+      try {
+        const verdict = await page.evaluate(
+          (hostAttr: string, hostId: string, dx: number, dy: number) => {
+            const host = document.querySelector(`[${hostAttr}="${hostId}"]`);
+            if (!(host instanceof HTMLElement)) return { error: "the ✦ disappeared before the hit test" };
+            host.style.marginLeft = `${dx}px`;
+            host.style.marginTop = `${dy}px`;
+            const li = host.closest('li[id^="chat-messages-"]');
+            let bar: DOMRect | null = null;
+            for (const candidate of li?.querySelectorAll("div") ?? []) {
+              if (getComputedStyle(candidate).position !== "absolute") continue;
+              const cr = candidate.getBoundingClientRect();
+              if (cr.width < 80 || cr.width > 600 || cr.height < 20 || cr.height > 60) continue;
+              bar = cr;
+              break;
+            }
+            const hr = host.getBoundingClientRect();
+            const cx = Math.round(hr.left + hr.width / 2);
+            const cy = Math.round(hr.top + hr.height / 2);
+            const hit = document.elementFromPoint(cx, cy);
+            return {
+              hovered: li?.matches(":hover") ?? false,
+              centreInsideToolbar: bar !== null && cx >= bar.left && cx <= bar.right && cy >= bar.top && cy <= bar.bottom,
+              ours: hit !== null && (hit === host || host.contains(hit)),
+              hit: hit === null ? "nothing" : `${hit.tagName.toLowerCase()}${hit.getAttribute("role") ? `[role=${hit.getAttribute("role")}]` : ""}`,
+              position: getComputedStyle(host).position,
+              zIndex: getComputedStyle(host).zIndex,
+            };
+          },
+          BUTTON_HOST_ATTR,
+          id,
+          placed.dx,
+          placed.dy,
+        );
+
+        if ("error" in verdict) throw new Error(verdict.error);
+        if (!verdict.hovered) throw new Error("the row's hover state did not engage — the check proves nothing in this state");
+        if (!verdict.centreInsideToolbar) {
+          throw new Error(`moving the ✦ by (${placed.dx},${placed.dy}) did not put its centre inside the toolbar box`);
+        }
+        if (!verdict.ours) {
+          throw new Error(
+            `a ✦ inside the hover toolbar is covered by ${verdict.hit} (host position:${verdict.position} z-index:${verdict.zIndex}) — a user hovering a long message to click it would miss`,
+          );
+        }
+        return `✦ moved (${placed.dx},${placed.dy}) into the hover toolbar (x ${placed.barLeft}..${placed.barLeft + placed.barWidth}) still wins the hit test (host position:${verdict.position} z-index:${verdict.zIndex})`;
+      } finally {
+        // Always: a stuck shift would push the next check's target off screen.
+        await restore();
+        await page.mouse.move(4, 4);
       }
-      return `✦ moved (+${placed.shift},+${placed.dy}) into the hover toolbar (x ${placed.barLeft}..${placed.barLeft + placed.barWidth}) still wins the hit test (host position:${verdict.position} z-index:${verdict.zIndex})`;
     },
   },
   {

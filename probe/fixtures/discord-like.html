@@ -36,8 +36,10 @@
         Hover toolbar. Not decoration: it reproduces the properties measured on live Discord
         (2026-09-02) — a ~257x34 box, `position: absolute`, `z-index: 1`, INSIDE the message
         row (not portaled), anchored to its top-right, mounted only while the row is hovered.
-        A message whose text ends under it would put our trailing inline ✦ beneath it, so the
-        `button-under-toolbar` probe check exists to prove the button still wins the hit test.
+        A message whose text ends under it would put our trailing inline ✦ beneath it. The
+        `button-under-toolbar` check does not depend on such a message existing: it moves our
+        own host into this box, because text length is a font- and viewport-dependent way to
+        arrange a stacking test.
       */
       li[id^="chat-messages-"] .hover-actions {
         display: none;
@@ -116,15 +118,6 @@
             message.embeds = [{ rawTitle: "Example", rawDescription: "An embed", url: "https://example.com", provider: { name: "Example" }, fields: [] }];
           }
           if (n % 17 === 0) message.type = 7; // system join notice
-          // Every 19th message is one long single line: its text runs to the right edge of
-          // the column, so the trailing inline ✦ lands underneath the hover toolbar. This is
-          // the case measured as possible on live Discord but never observed there
-          // (AGENTS.md 12, 2026-09-02); `button-under-toolbar` pins the stacking fix.
-          if (n % 19 === 0) {
-            message.type = 0;
-            message.attachments = [];
-            message.content = `long single line ${n} ` + "abcdefghij ".repeat(24) + "end";
-          }
           return message;
         }
 
@@ -154,7 +147,8 @@
           }
           li.append(article);
           // Mounted for every row; CSS shows it only while the row is hovered, exactly like
-          // Discord's. Appended outside the article so it is not in the text flow.
+          // Discord's. Appended after the article — its position is absolute, so DOM order
+          // does not place it, but it must not sit in the text flow.
           const actions = document.createElement("div");
           actions.className = "hover-actions";
           actions.setAttribute("role", "group");
