@@ -123,7 +123,7 @@ async function ensureDiscordListening(opts: StartOptions): Promise<number> {
 
   if (await isDiscordRunning()) {
     if (!opts.relaunch) {
-      throw new UserError("Discord is already running without the debugging flag; quit it and rerun, or pass --relaunch");
+      throw new UserError("Discord is already running without the debugging flag (check the tray icon too); quit it and rerun, or pass --relaunch to let Kibitz quit and restart it");
     }
     log.info("quitting the running Discord (--relaunch)");
     await quitDiscord();
