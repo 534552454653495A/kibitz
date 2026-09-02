@@ -556,21 +556,21 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   UI. → No named inner functions in page callbacks — inline the expression. The same trap
   applies to `\s` inside an evaluate template literal: it resolves to `s`, so
   `.replace(/\s+/g, " ")` silently deletes every "s" from the result.
-- **2026-09-02 — Known, unmeasured: the trailing ✦ could fall under Discord's hover
-  toolbar.** The button is inline at the end of the message text; Discord's per-message
-  action toolbar is absolutely positioned at the top-right of the row. Measured live at
-  1920px: the toolbar's left edge sat at x≈1378 while the content column ended at x≈1605,
-  so there is a **≈227px danger zone** at the right end of the column, and the widest
-  observed message ended at x≈1554 — inside it. Eight hovered samples were nonetheless
-  clear (their ✦ sat at x=473–713 because those messages wrap), so the case is neither
-  reproduced nor excluded. It would look like "the ✦ on long single-line messages does not
-  respond".
-  Still to measure before choosing a fix, because two attempts failed to re-acquire the
-  toolbar element (ARIA-label search matched nothing; hit-testing the row's top-right found
-  only a live-region label): whether the toolbar is portaled out of its `li` and which
-  ancestor forms its stacking context. Raising the host with `z-index` only works if the
-  toolbar shares our stacking context — do not reach for it before that measurement, and
-  prefer it over block placement, which changes every message's layout.
+- **2026-09-02 — The ✦ was unclickable under Discord's hover toolbar, and proving it took
+  three wrong measurements.** The toolbar appears exactly when the pointer is over the row,
+  i.e. when someone is about to click, so a message whose text reaches the right of the
+  column hid the button behind it. Measured on live Discord: the toolbar is `position:
+  absolute; z-index: 1`, ~257×34, anchored top-right **inside** the row (not portaled), so
+  a static host loses the hit test. Fix: `position: relative; z-index: 2` on the button host
+  (same stacking context, so out-stacking is enough), pinned by the `button-under-toolbar`
+  probe check, which fails without those two declarations.
+  The wrong measurements are the lesson: (1) an element rect is widened by image/embed
+  children, so "the text reaches x=1554" was false — measure the end of text with a `Range`
+  over its text nodes; (2) `offsetWidth` of a `display:none` toolbar is 0, which placed the
+  test button on the toolbar's edge instead of inside it — hover first, then measure;
+  (3) box intersection is not coverage, because the hit test happens at one point: the first
+  version of the check overlapped by a single pixel, the centre fell below the toolbar, and
+  it passed while testing nothing. A check that cannot fail is worse than no check.
 - **2026-09-02 — A channel with no message list is usually a voice channel.** A channel the
   probe (and the injector) found empty of `[data-list-id="chat-messages"]` turned out from
   its sidebar entry to be the voice channel the developer was connected to — not a text
