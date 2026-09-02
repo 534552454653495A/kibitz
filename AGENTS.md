@@ -611,14 +611,18 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   `image/webp` 115 KiB, and our `previewUrlFor` rewrite → 200 `image/webp` **40 KiB**. So the
   links are public and the rewrite is 7× cheaper while keeping the signature valid; that also
   validated `previewUrlFor` against the real CDN, which its string-level unit tests cannot.
-  Still unproven and deliberately not claimed: that a **specific** provider's fetcher
-  succeeds. A self-hosted server may have no route to the internet, and some (LM Studio)
-  never fetch URLs at all — they want inline bytes. That failure now has its own sentence in
-  `providers/errors.ts`, separate from "your model has no vision", because the remedies
-  differ. If it turns out to matter, the fix is to inline bytes as a `data:` URL (OpenAI) /
-  `source:{type:"base64"}` (Anthropic); the companion can fetch them freely, while the
-  extension would need a host permission for `media.discordapp.net` or a fetch performed in
-  the page — which is why it was not built on speculation.
+  A **hosted** provider's fetcher is now proven too, end to end on live Discord with the
+  owner's own OpenAI-compatible endpoint: the request carried
+  `images[media.discordapp.net … 1024×1024 signed]` and the answer described what was in the
+  picture ("an anime-style, animal-eared character sitting on the floor … used as a reaction
+  image"), which is only possible if the provider retrieved the signed link. Still unproven,
+  and deliberately not claimed: **self-hosted** servers. One may have no route to the
+  internet, and some (LM Studio) never fetch URLs at all — they want inline bytes. That
+  failure has its own sentence in `providers/errors.ts`, separate from "your model has no
+  vision", because the remedies differ. If it turns out to matter, the fix is to inline bytes
+  as a `data:` URL (OpenAI) / `source:{type:"base64"}` (Anthropic); the companion can fetch
+  them freely, while the extension would need a host permission for `media.discordapp.net` or
+  a fetch performed in the page — which is why it was not built on speculation.
 - **2026-09-02 — Image support looked broken for hours because the injected renderer was
   four hours old.** The companion reads `dist/desktop-renderer.js` **once**, at start, and
   `evaluateOnNewDocument` captures that text — so after `npm run build` the running Discord
@@ -627,9 +631,19 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   had vision code and was four minutes old, while the companion had been up 4h34m. Restarting
   it fixed it instantly, and the model then described the picture.
   → `readBundle` logs the bundle's size and build time at startup, `replaceBundle`
-  (`desktop/inject.ts`) swaps the init script, and `runCompanion` watches the file and prints
-  "renderer bundle rebuilt — press Ctrl+R in Discord to load it". Proven by rebuilding under
-  a live companion and watching that line appear.
+  (`desktop/inject.ts`) swaps the init script, and `runCompanion` watches for rebuilds and
+  prints "renderer bundle rebuilt — press Ctrl+R in Discord to load it".
+  **The first version of that fix was a lie, and measuring it is what caught it.** "Watching
+  the line appear" was mistaken for the fix working; patching `dist/` and reloading showed the
+  page still running the old bundle. Two separate causes, both now closed:
+  1. `fs.watch(file)` on Windows caught the first `npm run build` and then went permanently
+     deaf — esbuild replaces the file, so the handle watches an inode that no longer exists.
+     Now the **directory** is watched and events are filtered by basename. Proven with two
+     consecutive atomic replaces: rounds 1 and 2 both ran the new text after a reload.
+  2. A read can land mid-write and `readFile` **succeeds** on a truncated file, which would
+     inject a broken renderer. The text must now come back non-empty and the same size twice.
+  Rule that generalises: **a fix whose evidence is a log line is not evidence.** The claim was
+  "Ctrl+R loads the new build", so the check has to be Ctrl+R, then read what is live.
   The same trap exists for the extension with a different remedy: `chrome://extensions` → ↻
   and reload the Discord tab. Any report of the shape "my change is not there" starts by
   checking which build is actually running.

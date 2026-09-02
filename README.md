@@ -74,6 +74,11 @@ npm run desktop                # launches Discord with the flag, attaches, stays
   first instance, which ignores them.
 - Keep the terminal open; `Ctrl+C` disconnects Kibitz and leaves Discord running.
   Reload Discord (`Ctrl+R`) after changing settings.
+- After `npm run build`, the companion notices the new bundle and prints `renderer bundle
+  rebuilt`; press `Ctrl+R` in Discord to load it. Discord keeps executing the injected copy
+  until that reload, so an already-open window shows the old behaviour — if the terminal
+  never printed that line, restart the companion. (Extension equivalent:
+  `chrome://extensions` → ↻, then reload the Discord tab.)
 - Settings live in `%APPDATA%\kibitz\settings.json` (Windows), `~/Library/Application
   Support/kibitz/` (macOS) or `~/.config/kibitz/` (Linux), readable only by your user.
 - `npm run desktop -- help` lists `--port`, `--attach` (connect to a Discord you started

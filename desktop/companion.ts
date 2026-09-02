@@ -13,6 +13,7 @@
  */
 import { watch } from "node:fs";
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import puppeteer, { type Browser, type Page, type Target } from "puppeteer-core";
 import { log } from "../src/shared/log";
 import { isDiscordUrl } from "./cdp";
@@ -39,6 +40,8 @@ export interface CompanionOptions {
 const MAIN_WINDOW_TIMEOUT_MS = 120_000;
 /** One `npm run build` fires several fs events; wait for the writes to settle. */
 const BUNDLE_DEBOUNCE_MS = 300;
+/** How many times to re-read before giving up on a bundle whose size never settles. */
+const BUNDLE_STABLE_TRIES = 8;
 
 export const SECURITY_NOTE =
   "While Discord runs with --remote-debugging-port, that port is open on localhost: any process on this machine can drive Discord through it. Close Discord when you are done.";
@@ -137,36 +140,59 @@ export async function runCompanion(opts: CompanionOptions): Promise<void> {
  *
  * The trap this closes cost hours: the bundle is read once at start and captured by
  * `evaluateOnNewDocument`, so after `npm run build` the running Discord kept executing the
- * old renderer — image support looked broken because the injected code predated it, and no
- * amount of Ctrl+R helped (the reload re-ran the same captured text). Now the file is
- * watched, the init script is swapped, and the user is told what to press.
+ * old renderer — image support looked broken because the injected code predated it, and
+ * Ctrl+R did not help (the reload re-ran the same captured text).
  *
- * `fs.watch` fires several times for one write (truncate, then data), so the work is
- * debounced; a read that lands mid-write simply fails and the next event retries.
+ * Watches the **directory**, not the file. Measured on Windows: watching the file caught the
+ * first `npm run build` and then went permanently deaf, because esbuild replaces the file and
+ * the handle keeps watching the inode that is no longer there. A directory watch survives
+ * replacement, which is the only way this stays true after the second rebuild.
+ *
+ * One build fires several events, so the swap is debounced; and because a read can still land
+ * mid-write on platforms that write in place, the text must come back non-empty and the same
+ * size twice before it is injected — a truncated bundle would break the panel on next reload.
  */
 function watchBundle(bundlePath: string, pages: ReadonlySet<Page>): () => void {
+  const dir = path.dirname(bundlePath);
+  const name = path.basename(bundlePath);
   let timer: NodeJS.Timeout | undefined;
-  const watcher = watch(bundlePath, () => {
+  const watcher = watch(dir, (_event, changed) => {
+    // Windows reports the basename; some platforms report null for coalesced events.
+    if (changed !== null && changed !== name) return;
     clearTimeout(timer);
     timer = setTimeout(() => {
       void reloadBundle(bundlePath, pages);
     }, BUNDLE_DEBOUNCE_MS);
   });
-  watcher.on("error", (err) => log.debug("bundle watch stopped", err));
+  watcher.on("error", (err) => log.warn("bundle watch stopped; restart the companion to pick up rebuilds", err));
   return () => {
     clearTimeout(timer);
     watcher.close();
   };
 }
 
-async function reloadBundle(bundlePath: string, pages: ReadonlySet<Page>): Promise<void> {
-  let fresh: string;
-  try {
-    fresh = await fs.readFile(bundlePath, "utf8");
-  } catch (err) {
-    log.debug("bundle unreadable (mid-write?); waiting for the next change", err);
-    return;
+/** Reads the bundle only once it stops changing, so a half-written file is never injected. */
+async function readStableBundle(bundlePath: string): Promise<string | undefined> {
+  let previous = -1;
+  for (let attempt = 0; attempt < BUNDLE_STABLE_TRIES; attempt++) {
+    let text: string;
+    try {
+      text = await fs.readFile(bundlePath, "utf8");
+    } catch (err) {
+      log.debug("bundle unreadable (mid-write?)", err);
+      return undefined;
+    }
+    if (text.length > 0 && text.length === previous) return text;
+    previous = text.length;
+    await new Promise((resolve) => setTimeout(resolve, BUNDLE_DEBOUNCE_MS));
   }
+  log.warn("renderer bundle kept changing; not injecting a half-written build");
+  return undefined;
+}
+
+async function reloadBundle(bundlePath: string, pages: ReadonlySet<Page>): Promise<void> {
+  const fresh = await readStableBundle(bundlePath);
+  if (fresh === undefined) return;
   let swapped = 0;
   for (const page of pages) {
     try {

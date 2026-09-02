@@ -1,0 +1,107 @@
+/**
+ * The companion's injection bookkeeping. Both behaviours here are regressions that were
+ * measured on live Discord (AGENTS.md §12, 2026-09-02), not hypotheticals:
+ *
+ * - `companion.ts` subscribes to both `targetcreated` and `targetchanged`, which fire for the
+ *   same page, so `attachKibitz` must claim the page BEFORE its first await or the second
+ *   call reaches `exposeFunction` and Puppeteer rejects with "already exposed".
+ * - `replaceBundle` exists so a rebuilt bundle reaches the next reload; it must remove the
+ *   previous init script rather than stack a second copy, and must refuse a page whose attach
+ *   has not finished.
+ */
+import { describe, expect, it, vi } from "vitest";
+import type { Page } from "puppeteer-core";
+import { attachKibitz, replaceBundle } from "../../desktop/inject";
+
+/**
+ * A stand-in for the parts of Page injection uses. `exposeFunction` mimics Puppeteer's real
+ * failure (a second call for the same name rejects), which is the trap under test; the
+ * deferred resolution lets a test hold the first attach open and start a second.
+ */
+function fakePage(): {
+  page: Page;
+  scripts: Map<string, string>;
+  exposeCalls: number;
+  releaseExpose: () => void;
+} {
+  const scripts = new Map<string, string>();
+  const exposed = new Set<string>();
+  let nextId = 1;
+  const gate = Promise.withResolvers<void>();
+  const state = {
+    exposeCalls: 0,
+    releaseExpose: gate.resolve,
+    scripts,
+    page: {
+      url: () => "https://discord.com/channels/@me",
+      once: () => undefined,
+      exposeFunction: async (name: string) => {
+        state.exposeCalls++;
+        if (exposed.has(name)) throw new Error(`Failed to add page binding with name ${name}: already exposed`);
+        exposed.add(name);
+        await gate.promise;
+      },
+      evaluateOnNewDocument: async (source: string) => {
+        const identifier = String(nextId++);
+        scripts.set(identifier, source);
+        return { identifier };
+      },
+      removeScriptToEvaluateOnNewDocument: async (identifier: string) => {
+        scripts.delete(identifier);
+      },
+      evaluate: async () => undefined,
+    } as unknown as Page,
+  };
+  return state;
+}
+
+describe("attachKibitz", () => {
+  it("claims the page before awaiting, so overlapping target events do not double-expose", async () => {
+    const fake = fakePage();
+    const onRequest = vi.fn();
+    // targetcreated and targetchanged, back to back, with nothing awaited in between.
+    const first = attachKibitz(fake.page, { bundle: "//v1", onRequest });
+    const second = attachKibitz(fake.page, { bundle: "//v1", onRequest });
+    fake.releaseExpose();
+    await expect(Promise.all([first, second])).resolves.toBeDefined();
+    expect(fake.exposeCalls).toBe(1);
+    expect([...fake.scripts.values()]).toEqual(["//v1"]);
+  });
+
+  it("releases the claim when the binding fails, so the next target event can retry", async () => {
+    const fake = fakePage();
+    fake.releaseExpose();
+    // A window that dies mid-attach: the binding never installs. If the guard kept the page
+    // claimed, the popout that replaces it would never get Kibitz and nothing would say why.
+    vi.spyOn(fake.page, "exposeFunction").mockRejectedValueOnce(new Error("Target closed"));
+    await expect(attachKibitz(fake.page, { bundle: "//v1", onRequest: vi.fn() })).rejects.toThrow("Target closed");
+    await expect(attachKibitz(fake.page, { bundle: "//v1", onRequest: vi.fn() })).resolves.toBeUndefined();
+    expect([...fake.scripts.values()]).toEqual(["//v1"]);
+  });
+});
+
+describe("replaceBundle", () => {
+  it("swaps the init script instead of stacking a second copy", async () => {
+    const fake = fakePage();
+    fake.releaseExpose();
+    await attachKibitz(fake.page, { bundle: "//old", onRequest: vi.fn() });
+    await expect(replaceBundle(fake.page, "//new")).resolves.toBe(true);
+    // One script, and it is the new one: a stale copy left behind would run on the next
+    // document and re-mount the old renderer.
+    expect([...fake.scripts.values()]).toEqual(["//new"]);
+    await expect(replaceBundle(fake.page, "//newer")).resolves.toBe(true);
+    expect([...fake.scripts.values()]).toEqual(["//newer"]);
+  });
+
+  it("refuses a page that was never attached", async () => {
+    await expect(replaceBundle(fakePage().page, "//new")).resolves.toBe(false);
+  });
+
+  it("refuses a page whose attach is still in flight, which will register the fresh bundle anyway", async () => {
+    const fake = fakePage();
+    const attaching = attachKibitz(fake.page, { bundle: "//old", onRequest: vi.fn() });
+    await expect(replaceBundle(fake.page, "//new")).resolves.toBe(false);
+    fake.releaseExpose();
+    await attaching;
+  });
+});

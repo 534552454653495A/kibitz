@@ -24,13 +24,20 @@ export interface AttachOptions {
 /**
  * A page binding can only be added once per Page; a second `exposeFunction` with the same
  * name rejects. Tracking by Page (not by URL) survives navigations, which keep the Page.
- * The value is the id of the init script, so a rebuilt bundle can replace the old one
- * instead of stacking a second copy on the next document.
+ *
+ * The value is the id of the init script so a rebuilt bundle can replace the old one, and
+ * `PENDING` is written **synchronously**, before the first await: `companion.ts` listens to
+ * both `targetcreated` and `targetchanged`, which fire for the same page, so an id-only map
+ * would let two overlapping calls past the guard and the second `exposeFunction` would
+ * reject with "already exposed".
  */
-const attached = new WeakMap<Page, string>();
+const PENDING = "";
+const attached = new Map<Page, string>();
 
 export async function attachKibitz(page: Page, options: AttachOptions): Promise<void> {
   if (attached.has(page)) return;
+  attached.set(page, PENDING);
+  page.once("close", () => attached.delete(page));
   try {
     await page.exposeFunction(DESKTOP_CALL_BINDING, options.onRequest);
     const script = await page.evaluateOnNewDocument(options.bundle);
@@ -43,22 +50,25 @@ export async function attachKibitz(page: Page, options: AttachOptions): Promise<
 }
 
 /**
- * Replaces the bundle registered for future documents.
+ * Replaces the bundle registered for future documents. False means there was nothing to
+ * replace: the page is not attached, or its attach is still in flight (`PENDING`), in which
+ * case it is about to register the fresh bundle anyway.
  *
  * Why this exists: the companion reads dist/desktop-renderer.js once, at start, and
  * `evaluateOnNewDocument` captured that text — so after `npm run build` the running Discord
- * keeps executing the OLD renderer, and even Ctrl+R re-runs the old copy. That cost the
+ * keeps executing the OLD renderer, and Ctrl+R re-runs the same captured copy. That cost the
  * owner a whole feature: image support looked broken for hours because the injected code
- * predated it (AGENTS.md §12, 2026-09-02). Now `runCompanion` watches the file and calls
- * this, so a reload picks up the new build.
+ * predated it (AGENTS.md §12, 2026-09-02).
  *
  * Only the init script is swapped; the live document keeps the old code until it reloads
  * (evaluating a second copy into the same document would fight the `DESKTOP_MARKER` guard),
- * which is why the caller tells the user to press Ctrl+R.
+ * which is why the caller tells the user to press Ctrl+R. Measured on live Discord: a
+ * re-registered script runs on the next reload, and a removed one stops running — the
+ * mechanism is sound, the *trigger* was the fragile half (see `watchBundle`).
  */
 export async function replaceBundle(page: Page, bundle: string): Promise<boolean> {
   const previous = attached.get(page);
-  if (previous === undefined) return false;
+  if (previous === undefined || previous === PENDING) return false;
   await page.removeScriptToEvaluateOnNewDocument(previous);
   const script = await page.evaluateOnNewDocument(bundle);
   attached.set(page, script.identifier);
