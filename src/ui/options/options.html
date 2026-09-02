@@ -1,0 +1,47 @@
+<!doctype html>
+<!--
+  Kibitz settings page. Plain HTML + options.ts: it is a four-field form, and a framework
+  would be more code than the form. Element ids are the contract options.ts binds to.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kibitz settings</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Kibitz settings</h1>
+      <p class="lede">
+        Bring your own API key. It is stored only on this machine (<code>chrome.storage.local</code>)
+        and used only by the extension's background worker.
+      </p>
+
+      <form id="settings-form" autocomplete="off">
+        <label for="provider">Provider</label>
+        <select id="provider"></select>
+        <p class="hint" id="provider-hint"></p>
+
+        <label for="base-url">Base URL</label>
+        <input id="base-url" type="url" spellcheck="false" placeholder="https://api.openai.com/v1" />
+
+        <label for="api-key">API key</label>
+        <input id="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…" />
+
+        <label for="model">Model</label>
+        <input id="model" type="text" spellcheck="false" placeholder="gpt-4o-mini" />
+
+        <div class="actions">
+          <button type="submit" id="save">Save</button>
+          <button type="button" id="test">Test</button>
+          <span id="permission" class="permission" data-granted="unknown">Permission: unknown</span>
+        </div>
+      </form>
+
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+      <pre id="test-output" class="test-output" hidden></pre>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

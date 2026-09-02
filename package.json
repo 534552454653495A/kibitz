@@ -1,0 +1,33 @@
+{
+  "name": "kibitz",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ask an AI about any message on supported sites. Bring your own API key.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsx scripts/build.ts",
+    "dev": "tsx scripts/build.ts --watch",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "probe": "tsx probe/run.ts",
+    "probe:selftest": "tsx probe/run.ts --fixture probe/fixtures/discord-like.html",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "preact": "^10.29.8"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.2.8",
+    "@types/node": "^26.4.1",
+    "esbuild": "^0.28.2",
+    "jsdom": "^30.0.1",
+    "puppeteer": "^25.9.0",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

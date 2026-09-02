@@ -1,0 +1,6 @@
+# Paths the fix agent may change (prefix match, one per line). Enforced twice: by the
+# agent's tool allowlist in ai-fix.yml and by scripts/check-allowlist.sh on the final diff.
+# probe/ and src/core/ are excluded on purpose: an agent that can edit the check can
+# "fix" the check (AGENTS.md 7.1).
+src/adapters/
+tests/adapters/

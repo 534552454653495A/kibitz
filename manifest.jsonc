@@ -1,0 +1,53 @@
+// Kibitz manifest — source of truth. scripts/build.ts strips these comments into dist/manifest.json.
+// Chrome-only for the MVP (decided 2026-09-02). Firefox 128+ would additionally need
+// "background.scripts" and "browser_specific_settings.gecko"; see README "Firefox".
+{
+  "manifest_version": 3,
+  "name": "Kibitz",
+  "version": "0.1.0",
+  "description": "Ask an AI about any message on supported sites. Bring your own API key; nothing is proxied.",
+
+  // 111 = first Chrome honouring "world": "MAIN" in content_scripts (older Chrome would
+  // silently inject the bridge into the isolated world, where React fiber is unreachable).
+  // 120 = Promise.withResolvers and the other ES2024 APIs the bundle uses unpolyfilled.
+  "minimum_chrome_version": "120",
+
+  // The only install-time permission. Settings (API key, provider, model) live in
+  // chrome.storage.local — never `sync`, so the key never leaves the machine via Google.
+  "permissions": ["storage"],
+
+  // Zero host access by default. The options page requests exactly the origin of the
+  // API base URL the user typed (e.g. https://api.openai.com/*) via permissions.request().
+  // Patterns here only bound what MAY be requested; nothing is granted at install.
+  // localhost/127.0.0.1 exist for Ollama / LM Studio style local servers.
+  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+
+  // All LLM traffic goes through this worker (architecture decision 4). Content scripts
+  // never hold the API key, so a compromised page context cannot exfiltrate it.
+  "background": { "service_worker": "background.js" },
+
+  "content_scripts": [
+    {
+      // MAIN world bridge: runs inside Discord's own JS realm so it can read React fiber
+      // (architecture decision 2). document_start guarantees it is listening before the
+      // isolated-world script sends its first RPC. It has NO chrome.* access by design.
+      "matches": ["https://discord.com/*", "https://canary.discord.com/*", "https://ptb.discord.com/*"],
+      "js": ["discord-bridge.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      // Isolated world: MutationObserver, button injection, Shadow DOM panel, port to the
+      // service worker. Talks to the bridge only via CustomEvent with JSON-string details.
+      "matches": ["https://discord.com/*", "https://canary.discord.com/*", "https://ptb.discord.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "options_ui": { "page": "options.html", "open_in_tab": true },
+
+  // No icon assets shipped: Chrome renders a default glyph. Clicking it opens the options
+  // page (background/index.ts) — the panel itself lives inside the page, not in a popup.
+  "action": { "default_title": "Kibitz — settings" }
+}

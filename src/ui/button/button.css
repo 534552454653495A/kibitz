@@ -1,0 +1,26 @@
+/* Button stylesheet, injected into each button's shadow root. Only :host and our own
+   elements are styled; nothing here depends on the page's CSS (AGENTS.md 3.5). Kept
+   deliberately quiet: it sits next to every message and must not compete with them. */
+
+button {
+  appearance: none;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  background: transparent;
+  color: rgba(148, 155, 164, 0.75);
+  font: 13px/20px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  text-align: center;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+button:hover,
+button:focus-visible {
+  background: rgba(88, 101, 242, 0.25);
+  color: #dcdfff;
+  outline: none;
+}

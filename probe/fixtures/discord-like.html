@@ -1,0 +1,150 @@
+<!doctype html>
+<!--
+  Self-test fixture: a page that satisfies the Discord selector contract (selectors.ts)
+  without being Discord. `npm run probe:selftest` serves it at the real channel URL through
+  request interception, so Chrome injects the real extension (both worlds) and the real
+  probe checks run against it — proving Kibitz + probe work end to end without an account.
+
+  What it reproduces, and nothing more:
+    - [data-list-id="chat-messages"] inside a scrollable container (overflow-y: auto)
+    - li#chat-messages-<channelId>-<messageId> with #message-content-<messageId>
+    - a `__reactFiber$…` own property on each <li> whose memoizedProps carry
+      { message: MessageRecord-like, channel: ChannelRecord-like }
+    - lazy history: scrolling near the top prepends older messages (what Discord does
+      when it fetches more), so the scroll-back check can observe growth.
+  It deliberately uses NO class names on the elements the extension binds to.
+
+  A green self-test says "our code matches the contract we wrote down". Only the live
+  probe can say whether Discord still matches it.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Kibitz self-test fixture</title>
+    <style>
+      html, body { margin: 0; height: 100%; font: 15px/1.4 system-ui, sans-serif; background: #313338; color: #dbdee1; }
+      #frame { display: flex; height: 100%; }
+      #sidebar { width: 240px; background: #2b2d31; }
+      #chat { flex: 1; display: flex; flex-direction: column; }
+      #header { height: 48px; border-bottom: 1px solid #1e1f22; padding: 0 16px; line-height: 48px; }
+      #scroller { flex: 1; overflow-y: auto; }
+      [data-list-id="chat-messages"] { list-style: none; margin: 0; padding: 16px 0; }
+      li[id^="chat-messages-"] { padding: 4px 16px 4px 72px; position: relative; }
+      li[id^="chat-messages-"] h3 { margin: 0; font-size: 15px; color: #f2f3f5; }
+      li[id^="chat-messages-"] time { color: #949ba4; font-size: 12px; margin-left: 8px; }
+      #composer { height: 68px; padding: 0 16px; }
+      #composer div { margin-top: 12px; background: #383a40; border-radius: 8px; padding: 11px 16px; color: #6d6f78; }
+    </style>
+  </head>
+  <body>
+    <div id="frame">
+      <nav id="sidebar" aria-label="Channels"></nav>
+      <main id="chat">
+        <section id="header">#fixture</section>
+        <div id="scroller" role="group" tabindex="0">
+          <ol data-list-id="chat-messages" role="list" aria-label="Messages in fixture"></ol>
+        </div>
+        <form id="composer"><div>Message #fixture</div></form>
+      </main>
+    </div>
+    <script>
+      (() => {
+        // Channel/guild come from the URL so the fixture and the runner cannot drift.
+        const [, , guildId, channelId] = location.pathname.split("/");
+        const TOTAL = 120;          // oldest message index = 1
+        const INITIAL = 30;         // what a fresh render shows
+        const PAGE = 20;            // prepended per "fetch"
+        const FIBER_KEY = "__reactFiber$fixture";
+
+        const channel = { id: channelId, name: "fixture", guild_id: guildId };
+        const users = [
+          { id: "100000000000000101", username: "alice", globalName: "Alice", bot: false },
+          { id: "100000000000000102", username: "bob", globalName: null, bot: false },
+          { id: "100000000000000103", username: "helperbot", globalName: "Helper", bot: true },
+        ];
+
+        const snowflake = (n) => "1000000000000" + String(n).padStart(6, "0");
+        const isoAt = (n) => new Date(Date.UTC(2026, 0, 1, 0, n)).toISOString();
+
+        function record(n) {
+          const author = users[n % users.length];
+          const message = {
+            id: snowflake(n),
+            type: 0,
+            channel_id: channelId,
+            content: `fixture message ${n}`,
+            author,
+            timestamp: isoAt(n),
+            editedTimestamp: null,
+            attachments: [],
+            embeds: [],
+            mentions: [],
+            messageReference: null,
+            reactions: [],
+          };
+          if (n % 7 === 0) {
+            message.type = 19;
+            message.messageReference = { channel_id: channelId, message_id: snowflake(n - 1) };
+            message.content = `<@${users[0].id}> agreed, see message ${n - 1}`;
+            message.mentions = [users[0]];
+          }
+          if (n % 11 === 0) {
+            message.attachments = [{ id: snowflake(9000 + n), filename: `shot-${n}.png`, url: `https://cdn.example/shot-${n}.png`, content_type: "image/png", size: 1234 }];
+            message.content = "";
+          }
+          if (n % 13 === 0) {
+            message.embeds = [{ rawTitle: "Example", rawDescription: "An embed", url: "https://example.com", provider: { name: "Example" }, fields: [] }];
+          }
+          if (n % 17 === 0) message.type = 7; // system join notice
+          return message;
+        }
+
+        function item(n) {
+          const message = record(n);
+          const li = document.createElement("li");
+          li.id = `chat-messages-${channelId}-${message.id}`;
+          li.setAttribute("aria-setsize", "-1");
+          const article = document.createElement("div");
+          article.setAttribute("role", "article");
+          const h3 = document.createElement("h3");
+          h3.textContent = message.author.globalName ?? message.author.username;
+          const time = document.createElement("time");
+          time.dateTime = message.timestamp;
+          time.textContent = message.timestamp.slice(11, 16);
+          h3.append(time);
+          article.append(h3);
+          if (message.content !== "") {
+            const content = document.createElement("div");
+            content.id = `message-content-${message.id}`;
+            content.textContent = message.content;
+            article.append(content);
+          } else {
+            const media = document.createElement("div");
+            media.textContent = `[image ${message.attachments[0].filename}]`;
+            article.append(media);
+          }
+          li.append(article);
+          li[FIBER_KEY] = { memoizedProps: { message, channel }, return: null, child: null, sibling: null };
+          return li;
+        }
+
+        const list = document.querySelector('[data-list-id="chat-messages"]');
+        const scroller = document.getElementById("scroller");
+        let oldest = TOTAL - INITIAL + 1;
+        for (let n = oldest; n <= TOTAL; n++) list.append(item(n));
+        scroller.scrollTop = scroller.scrollHeight;
+
+        // "Fetch" older history when the user (or the scan) nears the top, keeping the
+        // viewport anchored the way Discord does.
+        scroller.addEventListener("scroll", () => {
+          if (scroller.scrollTop > 300 || oldest <= 1) return;
+          const before = scroller.scrollHeight;
+          const from = Math.max(1, oldest - PAGE);
+          for (let n = oldest - 1; n >= from; n--) list.prepend(item(n));
+          oldest = from;
+          scroller.scrollTop += scroller.scrollHeight - before;
+        });
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Kibitz fix agent output",
+  "description": "What the workflow reads after the fix agent finishes. `status` decides whether a PR is opened; nothing else the agent says is used.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "rationale", "changed_files"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["fixed", "needs-human"],
+      "description": "fixed = the working tree contains a complete fix and `npm run check` passed; needs-human = stop, a person must look (see reason)."
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 72,
+      "description": "Imperative, one line, no trailing period; becomes the commit subject after `fix(discord): `."
+    },
+    "rationale": {
+      "type": "string",
+      "description": "What changed in Discord (evidence from the probe report / outline), what was changed in selectors.ts and why it is expected to be stable."
+    },
+    "changed_files": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Repository-relative paths the agent edited or created."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Required when status is needs-human: precisely what blocks an automated fix (e.g. the change needs src/core, no semantic anchor exists near the list)."
+    }
+  }
+}

@@ -1,0 +1,126 @@
+# Independent review of fix-agent PRs (AGENTS.md 7). A clean-context agent sees the diff
+# and AGENTS.md, never the fix transcript. Its only outputs are the job summary, the
+# review.json artefact and the check status: `permissions: contents: read` makes posting a
+# comment impossible rather than merely forbidden. The workflow `name` is referenced by
+# ai-fix.yml's workflow_run trigger.
+name: ai-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (startsWith(github.head_ref, 'ai-fix/') || contains(github.event.pull_request.labels.*.name, 'ai-review'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: ai-review-${{ github.head_ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare diff and task
+        env:
+          BASE: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          mkdir -p .ai-review
+          git fetch origin "$BASE"
+          git diff "origin/$BASE...HEAD" > .ai-review/diff.patch
+          git diff --name-only "origin/$BASE...HEAD" > .ai-review/changed-files.txt
+          {
+            echo "# Review task: PR #$PR_NUMBER — $PR_TITLE"
+            echo
+            echo "Base branch: $BASE. Read AGENTS.md first; it is the review standard."
+            echo
+            echo "- Diff: .ai-review/diff.patch"
+            echo "- Changed files: .ai-review/changed-files.txt"
+            echo
+            echo "Changed files:"
+            echo
+            sed 's/^/- /' .ai-review/changed-files.txt
+            echo
+            echo "Output a single JSON object matching .github/ai/review-output.schema.json."
+          } > .ai-review/task.md
+          echo "diff: $(wc -l < .ai-review/diff.patch) lines, $(wc -l < .ai-review/changed-files.txt) files"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm install -g @anthropic-ai/claude-code
+
+      - name: Review agent
+        timeout-minutes: 20
+        env:
+          # Only the model key. No GitHub token of any kind reaches the agent.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ""
+          GH_TOKEN: ""
+        run: |
+          # --tools defines what exists (read-only + Bash for git diff / npm gates); --restricted
+          # confines file tools to the checkout; --allowedTools is what passes in dontAsk mode.
+          # --allowedTools alone would not remove WebFetch/WebSearch/Edit from the session.
+          # Schema MUST stay draft-07 (claude rejects newer drafts at startup); a rejected
+          # schema means no structured_output, which this workflow fail-closes to request_changes.
+          claude -p "$(cat .ai-review/task.md)" \
+            --append-system-prompt-file .github/ai/review-prompt.md \
+            --restricted \
+            --tools "Read,Glob,Grep,Bash" \
+            --permission-mode dontAsk \
+            --allowedTools "Read" "Glob" "Grep" "Bash(git diff *)" "Bash(git log *)" "Bash(npm test)" "Bash(npm run typecheck)" \
+            --disallowedTools "Bash(git push *)" "Bash(git commit *)" "Bash(gh *)" "Bash(curl *)" "Bash(wget *)" \
+            --max-turns 40 \
+            --max-budget-usd 3 \
+            --no-session-persistence \
+            --output-format json \
+            --json-schema "$(cat .github/ai/review-output.schema.json)" \
+            > .ai-review/agent-output.json || echo "claude exited with $?"
+
+      - name: Extract verdict
+        id: verdict
+        run: |
+          jq '.structured_output // empty' .ai-review/agent-output.json > .ai-review/review.json || true
+          if [ ! -s .ai-review/review.json ]; then
+            # No structured output = the agent did not finish; treat as request_changes so a
+            # silent failure can never look like an approval.
+            jq -n '{verdict: "request_changes", summary: "The review agent produced no structured output (budget, turn cap or crash). See the agent-output artefact.", findings: []}' > .ai-review/review.json
+          fi
+          verdict=$(jq -r '.verdict' .ai-review/review.json)
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          {
+            echo "## ai-review: $verdict"
+            echo
+            jq -r '.summary' .ai-review/review.json
+            echo
+            if [ "$(jq -r '.findings | length' .ai-review/review.json)" -gt 0 ]; then
+              echo "| Severity | File | Issue | Suggestion |"
+              echo "| --- | --- | --- | --- |"
+              jq -r '.findings[] | "| " + .severity + " | `" + .file + (if .line then ":" + (.line|tostring) else "" end) + "` | " + (.issue | gsub("\\|"; "\\\\|") | gsub("\n"; " ")) + " | " + (.suggestion | gsub("\\|"; "\\\\|") | gsub("\n"; " ")) + " |"' .ai-review/review.json
+            else
+              echo "No findings."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: review
+          path: .ai-review/review.json
+          retention-days: 14
+
+      - name: Fail on request_changes
+        if: steps.verdict.outputs.verdict == 'request_changes'
+        run: |
+          echo "ai-review requested changes; see the job summary and the review artefact"
+          exit 1

@@ -1,0 +1,8 @@
+node_modules/
+dist/
+probe-out/
+.ai-fix/
+.ai-review/
+*.log
+.env
+.env.*

@@ -1,0 +1,99 @@
+# Live-Discord selector-contract probe (AGENTS.md 7). Runs every 6 hours on Stable and
+# Canary (Canary receives Discord changes days earlier), on PRs that touch the contract,
+# and on demand. On schedule/dispatch failures it upserts ONE issue; on PRs it is just a
+# red check. The workflow `name` is referenced by ai-fix.yml's workflow_run trigger.
+name: canary-probe
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  pull_request:
+    paths:
+      - "src/**"
+      - "manifest.jsonc"
+      - "scripts/**"
+      - "probe/**"
+      - "package.json"
+      - "package-lock.json"
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Discord branch to probe
+        type: choice
+        default: both
+        options: [both, stable, canary]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    # Fork PRs get no secrets, so the probe could only fail there; skip instead of lying.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # `inputs` is empty outside workflow_dispatch, so the fallback (both) applies there.
+        branch: ${{ fromJSON(inputs.branch == 'stable' && '["stable"]' || inputs.branch == 'canary' && '["canary"]' || '["stable","canary"]') }}
+    concurrency:
+      group: canary-probe-${{ github.ref }}-${{ matrix.branch }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # Restored before `npm ci` so puppeteer's postinstall finds Chrome and skips the download.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/puppeteer
+          key: puppeteer-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - run: npm ci
+      - run: npm run build
+      - name: Probe ${{ matrix.branch }}
+        # Until the two DISCORD_* secrets exist the probe cannot log in; skipping (green,
+        # with a notice) beats a red run every 6 hours that files nothing. `secrets` is
+        # readable in step-level `if`, not job-level, hence the gate lives here.
+        if: ${{ secrets.DISCORD_PROBE_TOKEN != '' && secrets.DISCORD_PROBE_CHANNEL != '' }}
+        timeout-minutes: 15
+        env:
+          DISCORD_PROBE_TOKEN: ${{ secrets.DISCORD_PROBE_TOKEN }}
+          DISCORD_PROBE_CHANNEL: ${{ secrets.DISCORD_PROBE_CHANNEL }}
+        run: npm run probe -- --branch ${{ matrix.branch }}
+      - name: Not configured
+        if: ${{ secrets.DISCORD_PROBE_TOKEN == '' || secrets.DISCORD_PROBE_CHANNEL == '' }}
+        run: echo "::notice::DISCORD_PROBE_TOKEN / DISCORD_PROBE_CHANNEL not set; live probe skipped (see README 'Secrets to configure')"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-${{ matrix.branch }}
+          path: probe-out/${{ matrix.branch }}
+          retention-days: 14
+          if-no-files-found: warn
+
+  report:
+    needs: probe
+    # PRs get a red check and nothing else (AGENTS.md 7): no issue churn from in-progress work.
+    if: always() && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: probe-*
+          path: probe-artifacts
+      - name: Upsert the broken-selector issue
+        env:
+          # AI_FIX_TOKEN so the resulting `labeled` event triggers ai-fix. With the fallback
+          # GITHUB_TOKEN the issue is still created/updated, but ai-fix will NOT auto-trigger:
+          # events made by GITHUB_TOKEN never start other workflows (AGENTS.md 7.2).
+          GH_TOKEN: ${{ secrets.AI_FIX_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: .github/scripts/upsert-issue.sh probe-artifacts/

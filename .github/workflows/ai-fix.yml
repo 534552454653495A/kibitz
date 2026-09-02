@@ -1,0 +1,331 @@
+# Self-repair loop (AGENTS.md 7). Starts when canary-probe files/updates the
+# auto:broken-selector issue, or when the probe or ai-review goes red on an ai-fix/* branch,
+# or by hand. The AGENT only edits files; THIS WORKFLOW verifies (allowlist, diff cap,
+# npm run check), commits, pushes and opens the PR with AI_FIX_TOKEN. The agent step has
+# no GitHub token at all — that is the enforcement, not the prompt.
+name: ai-fix
+
+on:
+  issues:
+    types: [labeled]
+  workflow_run:
+    workflows: [canary-probe, ai-review]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Number of the auto:broken-selector issue to work on
+        required: true
+        type: string
+
+# Reads only. Every write goes through AI_FIX_TOKEN so the resulting events trigger the
+# next hop (GITHUB_TOKEN events never do — AGENTS.md 7.2).
+permissions:
+  contents: read
+  actions: read
+  issues: read
+
+jobs:
+  fix:
+    if: >-
+      (github.event_name == 'issues' && github.event.label.name == 'auto:broken-selector') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure' && startsWith(github.event.workflow_run.head_branch, 'ai-fix/issue-')) ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # One run per issue at a time, never cancelled: a cancelled agent leaves a half-edited
+    # tree that the next run would misread as its own work. All three triggers resolve to
+    # the branch name so they share the group.
+    concurrency:
+      group: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || format('ai-fix/issue-{0}', github.event.issue.number || inputs.issue_number) }}
+      cancel-in-progress: false
+    env:
+      BOT_NAME: kibitz-ai-fix[bot]
+      BOT_EMAIL: kibitz-ai-fix[bot]@users.noreply.github.com
+      MAX_ROUNDS: 5
+      DIFF_CAP: 600
+    steps:
+      - name: Resolve issue and branch
+        id: ctx
+        env:
+          EVENT: ${{ github.event_name }}
+          LABEL_ISSUE: ${{ github.event.issue.number }}
+          INPUT_ISSUE: ${{ inputs.issue_number }}
+          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          case "$EVENT" in
+            issues) issue="$LABEL_ISSUE" ;;
+            workflow_dispatch) issue="$INPUT_ISSUE" ;;
+            workflow_run) issue="${RUN_BRANCH#ai-fix/issue-}" ;;
+            *) issue="" ;;
+          esac
+          case "$issue" in
+            ''|*[!0-9]*) echo "cannot resolve an issue number from event $EVENT" >&2; exit 1 ;;
+          esac
+          echo "issue=$issue" >> "$GITHUB_OUTPUT"
+          echo "branch=ai-fix/issue-$issue" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.AI_FIX_TOKEN }}
+          fetch-depth: 0
+          # Not persisted: a persisted token sits base64-encoded in .git/config, readable by
+          # the agent's Read tool. The push step passes the token explicitly instead.
+          persist-credentials: false
+
+      - name: Prepare branch, stale check and round count
+        id: prep
+        env:
+          BRANCH: ${{ steps.ctx.outputs.branch }}
+          ISSUE: ${{ steps.ctx.outputs.issue }}
+          EVENT: ${{ github.event_name }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          GH_TOKEN: ${{ secrets.AI_FIX_TOKEN }}
+        run: |
+          # Per-command auth (never written to .git/config); see the checkout step.
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.extraheader=$auth" fetch origin main
+          if git -c "http.extraheader=$auth" ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
+            git -c "http.extraheader=$auth" fetch origin "$BRANCH"
+            git checkout -B "$BRANCH" "origin/$BRANCH"
+          else
+            git checkout -B "$BRANCH" origin/main
+          fi
+          # A workflow_run for an older commit of the branch must not start a round on top
+          # of newer work; a fresher run will (or already did) cover it.
+          if [ "$EVENT" = "workflow_run" ] && [ "$RUN_HEAD_SHA" != "$(git rev-parse HEAD)" ]; then
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            echo "reason=stale: run was for $RUN_HEAD_SHA, branch is at $(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The label is applied by several later steps; make sure it exists once, up front.
+          gh label create needs-human --force --color FBCA04 --description "The fix agent stopped; a maintainer must look" >/dev/null
+          round=$(.github/scripts/ai-fix-round.sh origin/main)
+          echo "round=$round" >> "$GITHUB_OUTPUT"
+          if [ "$round" -ge "$MAX_ROUNDS" ]; then
+            gh issue edit "$ISSUE" --add-label needs-human
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            echo "reason=round cap reached ($round bot commits on $BRANCH); labelled needs-human" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "go=true" >> "$GITHUB_OUTPUT"
+
+      - name: Collect evidence
+        if: steps.prep.outputs.go == 'true'
+        env:
+          EVENT: ${{ github.event_name }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          ISSUE: ${{ steps.ctx.outputs.issue }}
+          ROUND: ${{ steps.prep.outputs.round }}
+          # Read-only calls; the default token is enough and cannot trigger anything.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p .ai-fix/evidence
+          if [ "$EVENT" = "workflow_run" ]; then
+            gh run download "$RUN_ID" -D .ai-fix/evidence || echo "no artefacts on run $RUN_ID"
+            echo "$RUN_URL" > .ai-fix/evidence-run-url
+          else
+            latest=$(gh run list --workflow canary-probe.yml --branch main --status failure --limit 1 --json databaseId,url -q '.[0] // empty | "\(.databaseId) \(.url)"' || true)
+            if [ -n "$latest" ]; then
+              gh run download "${latest%% *}" -D .ai-fix/evidence || echo "no artefacts on run ${latest%% *}"
+              echo "${latest#* }" > .ai-fix/evidence-run-url
+            else
+              echo "no failed canary-probe run on main to download; relying on the issue text"
+              echo "(no probe run found)" > .ai-fix/evidence-run-url
+            fi
+          fi
+          gh issue view "$ISSUE" --json title,body -q '"# " + .title + "\n\n" + .body' > .ai-fix/issue.md
+          .github/scripts/build-task.sh "$ISSUE" "$ROUND"
+
+      - uses: actions/setup-node@v4
+        if: steps.prep.outputs.go == 'true'
+        with:
+          node-version: 22
+          cache: npm
+      - if: steps.prep.outputs.go == 'true'
+        run: npm ci
+      - if: steps.prep.outputs.go == 'true'
+        run: npm run build
+      - if: steps.prep.outputs.go == 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Fix agent
+        if: steps.prep.outputs.go == 'true'
+        timeout-minutes: 30
+        env:
+          # Only the model key. GitHub tokens are explicitly blanked so nothing inherited
+          # from the runner can reach the agent (AGENTS.md 7.1).
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ""
+          GH_TOKEN: ""
+        run: |
+          # Three layers, each with a distinct job — do not collapse them:
+          #   --tools          = which tools EXIST in the session (no WebFetch/WebSearch/Agent).
+          #                      --allowedTools alone only skips prompts; it removes nothing.
+          #   --restricted     = file tools confined to the checkout, no user/project settings
+          #                      loaded (Claude Code ≥ 2.1.248; `npm install -g` is always current).
+          #   --allowedTools   = the only calls that pass in dontAsk mode (path-scoped edits,
+          #                      the npm gates); everything else the agent tries is denied.
+          # The git-diff allowlist step below remains the guarantee that survives all of this.
+          # The schema MUST stay JSON Schema draft-07: claude validates with draft-07 and
+          # rejects newer drafts at startup — the agent would then never run, produce no
+          # structured_output, and every round would end in needs-human.
+          claude -p "$(cat .ai-fix/task.md)" \
+            --append-system-prompt-file .github/ai/fix-prompt.md \
+            --restricted \
+            --tools "Read,Glob,Grep,Edit,Write,Bash" \
+            --permission-mode dontAsk \
+            --allowedTools "Read" "Glob" "Grep" "Edit(src/adapters/**)" "Write(src/adapters/**)" "Edit(tests/adapters/**)" "Write(tests/adapters/**)" "Bash(npm run typecheck)" "Bash(npm test)" "Bash(npm run build)" "Bash(npm run check)" "Bash(npx vitest run*)" \
+            --disallowedTools "Bash(git *)" "Bash(gh *)" "Bash(curl *)" "Bash(wget *)" \
+            --max-turns 80 \
+            --max-budget-usd 5 \
+            --no-session-persistence \
+            --output-format json \
+            --json-schema "$(cat .github/ai/fix-output.schema.json)" \
+            > .ai-fix/agent-output.json || echo "claude exited with $?"
+
+      - name: Parse agent output
+        id: agent
+        if: steps.prep.outputs.go == 'true'
+        env:
+          ISSUE: ${{ steps.ctx.outputs.issue }}
+          GH_TOKEN: ${{ secrets.AI_FIX_TOKEN }}
+        run: |
+          jq '.structured_output // empty' .ai-fix/agent-output.json > .ai-fix/result.json 2>/dev/null || true
+          status=$(jq -r '.status // empty' .ai-fix/result.json 2>/dev/null || true)
+          if [ "$status" != "fixed" ]; then
+            reason="agent produced no structured output (budget, turn cap or crash)"
+            if [ -s .ai-fix/result.json ]; then
+              reason=$(jq -r '.reason // .summary // "agent gave no reason"' .ai-fix/result.json)
+            fi
+            git checkout -- . && git clean -fd -e .ai-fix
+            gh issue edit "$ISSUE" --add-label needs-human
+            echo "status=needs-human" >> "$GITHUB_OUTPUT"
+            echo "reason=$(printf '%s' "$reason" | tr '\r\n' '  ' | cut -c1-500)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "status=fixed"
+            echo "summary=$(jq -r '.summary' .ai-fix/result.json | tr -d '\r\n' | cut -c1-72)"
+          } >> "$GITHUB_OUTPUT"
+          jq -r '.rationale' .ai-fix/result.json > .ai-fix/rationale.md
+
+      - name: Enforce allowlist
+        if: steps.agent.outputs.status == 'fixed'
+        env:
+          ISSUE: ${{ steps.ctx.outputs.issue }}
+          GH_TOKEN: ${{ secrets.AI_FIX_TOKEN }}
+        run: |
+          if ! .github/scripts/check-allowlist.sh; then
+            git checkout -- . && git clean -fd -e .ai-fix
+            gh issue edit "$ISSUE" --add-label needs-human
+            echo "::error::the agent changed files outside the allowlist; reverted and labelled needs-human"
+            exit 1
+          fi
+
+      - name: Enforce diff size cap
+        if: steps.agent.outputs.status == 'fixed'
+        env:
+          ISSUE: ${{ steps.ctx.outputs.issue }}
+          GH_TOKEN: ${{ secrets.AI_FIX_TOKEN }}
+        run: |
+          # Binary files show "-" in numstat; count them as 0.
+          tracked=$(git diff --numstat HEAD | awk '{ a = ($1 == "-") ? 0 : $1; d = ($2 == "-") ? 0 : $2; s += a + d } END { print s + 0 }')
+          untracked=0
+          while IFS= read -r f; do
+            case "$f" in ''|.ai-fix/*) continue ;; esac
+            untracked=$((untracked + $(wc -l < "$f")))
+          done < <(git ls-files --others --exclude-standard)
+          total=$((tracked + untracked))
+          echo "changed lines: $total (tracked $tracked, untracked $untracked; cap $DIFF_CAP)"
+          if [ "$total" -gt "$DIFF_CAP" ]; then
+            git checkout -- . && git clean -fd -e .ai-fix
+            gh issue edit "$ISSUE" --add-label needs-human
+            echo "::error::diff of $total lines exceeds the cap of $DIFF_CAP; reverted and labelled needs-human"
+            exit 1
+          fi
+
+      - name: Verify (npm run check)
+        if: steps.agent.outputs.status == 'fixed'
+        env:
+          ISSUE: ${{ steps.ctx.outputs.issue }}
+          GH_TOKEN: ${{ secrets.AI_FIX_TOKEN }}
+        run: |
+          if ! npm run check; then
+            git checkout -- . && git clean -fd -e .ai-fix
+            gh issue edit "$ISSUE" --add-label needs-human
+            echo "::error::npm run check failed on the agent's tree; reverted and labelled needs-human"
+            exit 1
+          fi
+
+      - name: Commit, push, open or update PR
+        if: steps.agent.outputs.status == 'fixed'
+        env:
+          ISSUE: ${{ steps.ctx.outputs.issue }}
+          BRANCH: ${{ steps.ctx.outputs.branch }}
+          ROUND: ${{ steps.prep.outputs.round }}
+          SUMMARY: ${{ steps.agent.outputs.summary }}
+          FIX_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_TOKEN: ${{ secrets.AI_FIX_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          git config user.name "$BOT_NAME"
+          git config user.email "$BOT_EMAIL"
+          git add -A -- . ':(exclude).ai-fix'
+          if git diff --cached --quiet; then
+            echo "agent reported fixed but the tree is unchanged; nothing to commit"
+            gh issue edit "$ISSUE" --add-label needs-human
+            exit 1
+          fi
+          this_round=$((ROUND + 1))
+          git commit -m "fix(discord): $SUMMARY (ai-fix round $this_round)" -m "Refs #$ISSUE"
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.extraheader=$auth" push origin "HEAD:refs/heads/$BRANCH"
+
+          # Render the PR body from the template; quoted replacements keep & and
+          # newlines in the rationale literal (bash 5.2 patsub_replacement).
+          body=$(cat .github/ai/pr-body.md)
+          rationale=$(cat .ai-fix/rationale.md)
+          evidence_url=$(cat .ai-fix/evidence-run-url 2>/dev/null || echo "(unknown)")
+          body="${body//\{\{ISSUE\}\}/"$ISSUE"}"
+          body="${body//\{\{ROUND\}\}/"$this_round"}"
+          body="${body//\{\{RATIONALE\}\}/"$rationale"}"
+          body="${body//\{\{EVIDENCE_RUN_URL\}\}/"$evidence_url"}"
+          body="${body//\{\{FIX_RUN_URL\}\}/"$FIX_RUN_URL"}"
+          printf '%s\n' "$body" > .ai-fix/pr-body.md
+
+          if [ "$(gh pr list --head "$BRANCH" --state open --json number --jq 'length')" = "0" ]; then
+            gh label create ai-fix --force --color 5319E7 --description "Pull request produced by the fix agent" >/dev/null
+            gh pr create --base main --head "$BRANCH" --label ai-fix \
+              --title "fix(discord): $SUMMARY" --body-file .ai-fix/pr-body.md
+          else
+            echo "open PR for $BRANCH already exists; the push updated it"
+          fi
+
+      - name: Job summary
+        if: always()
+        env:
+          ISSUE: ${{ steps.ctx.outputs.issue }}
+          BRANCH: ${{ steps.ctx.outputs.branch }}
+          GO: ${{ steps.prep.outputs.go }}
+          PREP_REASON: ${{ steps.prep.outputs.reason }}
+          ROUND: ${{ steps.prep.outputs.round }}
+          STATUS: ${{ steps.agent.outputs.status }}
+          AGENT_REASON: ${{ steps.agent.outputs.reason }}
+          SUMMARY: ${{ steps.agent.outputs.summary }}
+        run: |
+          {
+            echo "## ai-fix — issue #${ISSUE:-?} on \`${BRANCH:-?}\`"
+            echo
+            if [ "$GO" != "true" ]; then
+              echo "Skipped: ${PREP_REASON:-preparation failed before a decision was made}"
+            elif [ "$STATUS" = "fixed" ]; then
+              echo "Round $((ROUND + 1)): committed \`fix(discord): $SUMMARY\`; see the PR on \`$BRANCH\`."
+            elif [ "$STATUS" = "needs-human" ]; then
+              echo "Round $((ROUND + 1)): agent stopped — ${AGENT_REASON}. Issue labelled needs-human."
+            else
+              echo "Round $((ROUND + 1)): a verification step failed; see the log above."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

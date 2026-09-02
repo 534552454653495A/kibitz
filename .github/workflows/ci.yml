@@ -1,0 +1,40 @@
+# Unit-level gate: typecheck + tests + build (AGENTS.md 10.1), then the account-free
+# end-to-end self-test (real extension + real probe checks against a contract-shaped
+# fixture page). The live-Discord signal is canary-probe.yml, kept separate so a Discord
+# outage cannot block unrelated PRs — and so fork PRs, which get no secrets, still get e2e.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # Restored before `npm ci` so puppeteer's postinstall finds Chrome and skips the download.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/puppeteer
+          key: puppeteer-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - run: npm ci
+      - run: npm run check
+      - name: Extension self-test (fixture page, no account)
+        timeout-minutes: 5
+        run: npm run probe:selftest
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: probe-fixture
+          path: probe-out/fixture
+          retention-days: 7
