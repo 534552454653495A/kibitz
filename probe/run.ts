@@ -224,25 +224,37 @@ async function runChecks(ctx: ProbeContext, results: CheckResult[]): Promise<Fai
       console.log(`  ✅ ${check.id}: ${detail}`);
     } catch (e: unknown) {
       const err = e instanceof Error ? e : new Error(String(e));
-      const onChannel = await stillOnChannel(ctx);
-      const detail = onChannel ? `${err.name}: ${err.message}` : `${err.name}: ${err.message} (the view had left channel ${ctx.channelId})`;
+      const where = await viewLocation(ctx);
+      const suffix =
+        where === "elsewhere"
+          ? ` (the view had left channel ${ctx.channelId})`
+          : where === "unreachable"
+            ? " (the page could not be asked where it was)"
+            : "";
+      const detail = `${err.name}: ${err.message}${suffix}`;
       results.push({ id: check.id, description: check.description, ok: false, ms: Date.now() - started, detail });
       console.log(`  ❌ ${check.id}: ${detail}`);
-      if (err instanceof ProbeSessionError || !onChannel) return "session";
+      if (where === "unreachable") return "setup";
+      if (err instanceof ProbeSessionError || where === "elsewhere") return "session";
       return "contract";
     }
   }
   return "none";
 }
 
-/** False when the page navigated away from the channel under test, or cannot be asked. */
-async function stillOnChannel(ctx: ProbeContext): Promise<boolean> {
+/**
+ * Where the view is, as far as classification cares. A page that cannot be asked is not
+ * evidence of a contract break either — it is a dead browser, which is what `setup` means;
+ * the check's own failure detail is already in the report, so nothing is lost.
+ */
+type ViewLocation = "on-channel" | "elsewhere" | "unreachable";
+
+async function viewLocation(ctx: ProbeContext): Promise<ViewLocation> {
   try {
     const pathname = await withTimeout(ctx.page.evaluate(() => location.pathname), 5_000, "location check");
-    return parseChannelPath(pathname)?.channelId === ctx.channelId;
+    return parseChannelPath(pathname)?.channelId === ctx.channelId ? "on-channel" : "elsewhere";
   } catch {
-    // A page that cannot answer is not evidence of a contract break either.
-    return false;
+    return "unreachable";
   }
 }
 

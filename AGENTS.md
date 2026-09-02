@@ -556,3 +556,21 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   UI. → No named inner functions in page callbacks — inline the expression. The same trap
   applies to `\s` inside an evaluate template literal: it resolves to `s`, so
   `.replace(/\s+/g, " ")` silently deletes every "s" from the result.
+- **2026-09-02 — Known, unmeasured: the trailing ✦ could fall under Discord's hover
+  toolbar.** The button is inline at the end of the message text; Discord's per-message
+  action toolbar is absolutely positioned at the top-right of the row. Measured live at
+  1920px: the toolbar's left edge sits at x≈1378 while the content column ends at x≈1605,
+  so there is a **≈227px danger zone** at the right end of the column. Six hovered samples
+  were all clear (✦ at x=473–713, nowhere near it) and no message in any observed channel
+  ended inside the zone, so the case is neither reproduced nor excluded. It would look like
+  "the ✦ on long single-line messages does not respond". If it is reported, the hypothesis
+  is ready: check the hit test while hovering such a message before changing placement, and
+  prefer raising the host (`position: relative` + `z-index`) over moving the button, because
+  block placement changes every message's layout.
+- **2026-09-02 — Live verification competes with the developer using Discord.** Five live
+  runs were defeated by channel switches, a channel with no chat scroller, and an open
+  context menu whose transparent full-viewport backdrop covered every target. Electron
+  refuses `Target.createTarget`, so a probe cannot open its own page. → Live checks against
+  a shared window prove only what they observe; the scheduled probe (dedicated throwaway
+  account, nobody driving) is the authority, and `failureKind` exists so a disturbed run
+  never wakes the fix agent.

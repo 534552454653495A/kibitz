@@ -291,6 +291,13 @@ export const CHECKS: ProbeCheck[] = [
      * probe files `auto:broken-selector` and sends the fix agent after a selector that never
      * broke, so the click waits until the same coordinates hold still across two samples and
      * still hit-test to our host, and it clicks the coordinates rather than a stale handle.
+     *
+     * Two further measured causes of a covered target, both transient, both retried with the
+     * pointer parked in a corner first: Discord puts a transparent full-viewport `fixed` div
+     * behind an open context menu to catch the dismissing click, and hovering a message
+     * raises its action toolbar. The covering element is described in full (tag, role,
+     * aria-label, data-*, rect) because that string is the evidence the fix agent reads —
+     * `div#` with an empty id, which is every Discord element, tells nobody anything.
      */
     async run(ctx) {
       const { page } = ctx;
@@ -310,13 +317,34 @@ export const CHECKS: ProbeCheck[] = [
           const y = Math.round(r.top + r.height / 2);
           const hit = document.elementFromPoint(x, y);
           if (!hit || !(hit === host || host.contains(hit))) {
-            return { error: `button host is covered by ${hit ? `${hit.tagName.toLowerCase()}#${hit.id}` : "nothing"}` };
+            if (!hit) return { error: `nothing hit-tests at the button host (${x},${y})` };
+            const hr = hit.getBoundingClientRect();
+            const data = Array.from(hit.attributes)
+              .filter((a) => a.name.startsWith("data-") || a.name === "role" || a.name === "aria-label")
+              .map((a) => `${a.name}=${a.value.slice(0, 32)}`)
+              .join(" ");
+            const fullViewport = Math.round(hr.width) >= innerWidth && Math.round(hr.height) >= innerHeight;
+            return {
+              error:
+                `button host at (${x},${y}) size ${Math.round(r.width)}x${Math.round(r.height)} is covered by ` +
+                `<${hit.tagName.toLowerCase()}${data ? ` ${data}` : ""}> at ` +
+                `${Math.round(hr.left)},${Math.round(hr.top)} ${Math.round(hr.width)}x${Math.round(hr.height)}` +
+                `${fullViewport ? " — a full-viewport layer (open context menu or modal backdrop)" : ""}` +
+                ` [position:${getComputedStyle(hit).position} pointer-events:${getComputedStyle(hit).pointerEvents}]`,
+            };
           }
           return { x, y, messageId: host.getAttribute(hostAttr) ?? "" };
         }, BUTTON_HOST_ATTR);
 
       let last = "never sampled";
       for (let attempt = 0; attempt < 12; attempt++) {
+        // Park the pointer away from the list first: a hover toolbar or a popout that a
+        // previous attempt's own mouse move opened would otherwise cover the target for
+        // every remaining attempt.
+        if (attempt > 0) {
+          await page.mouse.move(4, 4);
+          await setTimeout(POLL_INTERVAL_MS);
+        }
         const first = await spot();
         await setTimeout(POLL_INTERVAL_MS);
         const second = await spot();
