@@ -369,7 +369,7 @@ of re-learning it.
 | Secret | Used by | Notes |
 | --- | --- | --- |
 | `DISCORD_PROBE_TOKEN` | canary-probe | Token of a **throwaway** account. Automation violates Discord ToS; the account may be terminated. Never a personal account. If Discord challenges logins from GitHub's datacenter IPs, the probe reports `failureKind: session` and files `auto:probe-session` (no agent); the remedy is a self-hosted runner on a residential IP or a fresh account, not a code change. |
-| `DISCORD_PROBE_CHANNEL` | canary-probe | `<guildId>/<channelId>` of a channel the throwaway account can read, with ≥60 messages including a reply and an attachment. |
+| `DISCORD_PROBE_CHANNEL` | canary-probe | `<guildId>/<channelId>` of a **text** channel the throwaway account can read, with ≥60 messages including a reply and an attachment. Forum, voice-only and unreadable channels render no message scroller at all, which `list-root` cannot distinguish from a dead selector — its error names both readings. |
 | `ANTHROPIC_API_KEY` | ai-fix, ai-review | Claude Code headless. Budget-capped per run via `--max-budget-usd`. |
 | `AI_FIX_TOKEN` | canary-probe (issue), ai-fix (push/PR) | Fine-grained PAT or GitHub App token with Contents RW + Issues RW + Pull requests RW on this repo only. |
 

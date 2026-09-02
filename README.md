@@ -179,7 +179,7 @@ reasons are in [AGENTS.md §7](AGENTS.md#7-self-repair-pipeline).
 | Secret | What |
 | --- | --- |
 | `DISCORD_PROBE_TOKEN` | Token of a **throwaway** Discord account. Automated use violates Discord's ToS and the account may be terminated — never use a personal one. If Discord challenges the login from GitHub's IPs, the probe files an `auto:probe-session` issue (no agent runs); use a self-hosted runner on a residential IP or a fresh account. |
-| `DISCORD_PROBE_CHANNEL` | `<guildId>/<channelId>` of a channel that account can read. |
+| `DISCORD_PROBE_CHANNEL` | `<guildId>/<channelId>` of a **text** channel that account can read (a forum or voice-only channel has no message list, which the probe reports as a failure). |
 | `ANTHROPIC_API_KEY` | For the fix/review agents (`claude -p`, budget-capped per run). |
 | `AI_FIX_TOKEN` | Fine-grained PAT (or GitHub App token) with **Contents**, **Issues**, **Pull requests** read/write on this repo only. Needed because events created with the default `GITHUB_TOKEN` do not trigger other workflows. |
 

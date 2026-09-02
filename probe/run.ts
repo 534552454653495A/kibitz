@@ -27,7 +27,7 @@ import { parseArgs } from "node:util";
 import puppeteer, { type Browser, type Page } from "puppeteer";
 import { attachKibitz, deliver } from "../desktop/inject";
 import { createDesktopRequestHandler } from "../desktop/request-handler";
-import { HOSTS } from "../src/adapters/discord/selectors";
+import { HOSTS, parseChannelPath } from "../src/adapters/discord/selectors";
 import { LOG_PREFIX } from "../src/shared/log";
 import { CHECKS, ProbeSessionError, type ProbeContext } from "./checks";
 import { installDiscordToken } from "./discord-session";
@@ -205,6 +205,16 @@ async function bundleHelper(): Promise<string> {
   return file.text;
 }
 
+/**
+ * Runs the checks in order and stops at the first failure.
+ *
+ * Classification happens HERE, in one place, for every check including the ones that fail
+ * inside `until()` on a timeout: if the view is no longer on the configured channel, the
+ * missing elements have a cause no selector fix can address (another client navigated, a
+ * redirect, a rejected token), so the failure is a `session` one and the fix agent is never
+ * started. Measured while sharing a developer's own Discord (2026-09-02): the channel moved
+ * mid-run twice, and a per-check guard missed the checks whose throw came from `until()`.
+ */
 async function runChecks(ctx: ProbeContext, results: CheckResult[]): Promise<FailureKind> {
   for (const check of CHECKS) {
     const started = Date.now();
@@ -214,13 +224,26 @@ async function runChecks(ctx: ProbeContext, results: CheckResult[]): Promise<Fai
       console.log(`  ✅ ${check.id}: ${detail}`);
     } catch (e: unknown) {
       const err = e instanceof Error ? e : new Error(String(e));
-      const detail = `${err.name}: ${err.message}`;
+      const onChannel = await stillOnChannel(ctx);
+      const detail = onChannel ? `${err.name}: ${err.message}` : `${err.name}: ${err.message} (the view had left channel ${ctx.channelId})`;
       results.push({ id: check.id, description: check.description, ok: false, ms: Date.now() - started, detail });
       console.log(`  ❌ ${check.id}: ${detail}`);
-      return err instanceof ProbeSessionError ? "session" : "contract";
+      if (err instanceof ProbeSessionError || !onChannel) return "session";
+      return "contract";
     }
   }
   return "none";
+}
+
+/** False when the page navigated away from the channel under test, or cannot be asked. */
+async function stillOnChannel(ctx: ProbeContext): Promise<boolean> {
+  try {
+    const pathname = await withTimeout(ctx.page.evaluate(() => location.pathname), 5_000, "location check");
+    return parseChannelPath(pathname)?.channelId === ctx.channelId;
+  } catch {
+    // A page that cannot answer is not evidence of a contract break either.
+    return false;
+  }
 }
 
 /** Best effort, each bounded: a page that hung the checks may hang these too. */

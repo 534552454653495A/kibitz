@@ -57,20 +57,6 @@ export class ProbeSessionError extends Error {
   override readonly name = "ProbeSessionError";
 }
 
-/**
- * Called when a check cannot find what an earlier check already saw. If the view has left
- * the configured channel, the elements are gone for a reason that no selector fix can
- * address — measured while sharing a developer's own Discord (2026-09-02): the channel
- * changed between `button-injected` and `button-clickable`, and without this the run would
- * have filed `auto:broken-selector` for a phantom.
- */
-async function assertStillOnChannel(page: Page, channelId: string, what: string): Promise<void> {
-  const path = await page.evaluate(() => location.pathname);
-  if (parseChannelPath(path)?.channelId !== channelId) {
-    throw new ProbeSessionError(`${what}: the view left channel ${channelId} (now at ${path}) — another client or a redirect moved it`);
-  }
-}
-
 /** CDP round-trips are cheap, but tighter polling only speeds up a check by half a tick. */
 const POLL_INTERVAL_MS = 500;
 
@@ -139,24 +125,37 @@ export const CHECKS: ProbeCheck[] = [
     // Discord's boot on a cold CI runner (no cache, gateway handshake) routinely takes a minute.
     timeoutMs: 95_000,
     async run({ page, channelId }) {
-      const found = await until(
-        `MESSAGE_LIST (${MESSAGE_LIST})`,
-        90_000,
-        () =>
-          page.evaluate(
-            (sel: string) => ({ list: document.querySelector(sel) !== null, path: location.pathname }),
-            MESSAGE_LIST,
-          ).then((r) => {
-            // Leaving the channel URL means the token was rejected or the channel is
-            // unreadable; waiting the full 90s for a list that will never appear is pointless.
-            if (parseChannelPath(r.path)?.channelId !== channelId) {
-              throw new ProbeSessionError(`navigated away from the channel: now at ${r.path} (token rejected, login challenge, or channel unreadable)`);
-            }
-            return r.list ? r : null;
-          }),
-        () => page.evaluate(() => location.pathname),
-      );
-      return `found at ${found.path}`;
+      try {
+        const found = await until(
+          `MESSAGE_LIST (${MESSAGE_LIST})`,
+          90_000,
+          () =>
+            page.evaluate(
+              (sel: string) => ({ list: document.querySelector(sel) !== null, path: location.pathname }),
+              MESSAGE_LIST,
+            ).then((r) => {
+              // Leaving the channel URL means the token was rejected or the channel is
+              // unreadable; waiting the full 90s for a list that will never appear is pointless.
+              if (parseChannelPath(r.path)?.channelId !== channelId) {
+                throw new ProbeSessionError(`navigated away from the channel: now at ${r.path} (token rejected, login challenge, or channel unreadable)`);
+              }
+              return r.list ? r : null;
+            }),
+          () => page.evaluate(() => location.pathname),
+        );
+        return `found at ${found.path}`;
+      } catch (err) {
+        if (err instanceof ProbeSessionError) throw err;
+        // A channel that exists but renders no message list is the other reading of this
+        // failure, and it is a configuration problem rather than a dead selector: forum,
+        // voice-only and unreadable channels have no chat scroller at all. Measured against
+        // a developer's own Discord (2026-09-02), which sat in such a channel. The message
+        // says so, because the alternative is a fix agent hunting a selector that is fine.
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `${message} — either MESSAGE_LIST changed, or DISCORD_PROBE_CHANNEL is not a text channel with readable history (forum, voice-only or no access all render no scroller)`,
+        );
+      }
     },
   },
   {
@@ -294,7 +293,7 @@ export const CHECKS: ProbeCheck[] = [
      * still hit-test to our host, and it clicks the coordinates rather than a stale handle.
      */
     async run(ctx) {
-      const { page, channelId } = ctx;
+      const { page } = ctx;
       // No named inner functions inside a page callback: tsx compiles them with esbuild's
       // `__name` helper, which does not exist in the page — the call fails with
       // "ReferenceError: __name is not defined" and reads like a broken button.
@@ -338,7 +337,6 @@ export const CHECKS: ProbeCheck[] = [
         ctx.clickedMessageId = second.messageId;
         return `clicked button of ${second.messageId} at (${second.x},${second.y}) after ${attempt + 1} settle attempt(s)`;
       }
-      await assertStillOnChannel(page, channelId, "button-clickable");
       throw new Error(`no button host held still long enough to click: ${last}`);
     },
   },
@@ -393,12 +391,9 @@ export const CHECKS: ProbeCheck[] = [
      * `auto:broken-selector` and sending the fix agent after a selector that never broke.
      * A delta still catches a real leak and is immune to whatever the channel already had.
      */
-    async run({ page, channelId }) {
+    async run({ page }) {
       const settingsTab: ElementHandle | null = await page.$(`[${PANEL_HOST_ATTR}] >>> [${ACTION_ATTR}="view-settings"]`);
-      if (!settingsTab) {
-        await assertStillOnChannel(page, channelId, "panel-input");
-        throw new Error(`no [${ACTION_ATTR}="view-settings"] in the panel`);
-      }
+      if (!settingsTab) throw new Error(`no [${ACTION_ATTR}="view-settings"] in the panel`);
       await settingsTab.click();
       await settingsTab.dispose();
 
@@ -440,13 +435,10 @@ export const CHECKS: ProbeCheck[] = [
     id: "scroll-back",
     description: "scan related messages scrolls back and collects more than what was rendered",
     timeoutMs: 90_000,
-    async run({ page, channelId }) {
+    async run({ page }) {
       const initial = (await renderedItemIds(page)).length;
       const scan: ElementHandle | null = await page.$(`[${PANEL_HOST_ATTR}] >>> [${ACTION_ATTR}="scan"]`);
-      if (!scan) {
-        await assertStillOnChannel(page, channelId, "scroll-back");
-        throw new Error(`no [${ACTION_ATTR}="scan"] inside the panel's shadow root`);
-      }
+      if (!scan) throw new Error(`no [${ACTION_ATTR}="scan"] inside the panel's shadow root`);
       await scan.click();
       await scan.dispose();
 
@@ -468,7 +460,6 @@ export const CHECKS: ProbeCheck[] = [
       );
       const count = Number(done.count);
       if (!Number.isFinite(count) || count <= initial) {
-        await assertStillOnChannel(page, channelId, "scroll-back");
         throw new Error(`scan collected ${done.count ?? "?"} messages but ${initial} were already rendered — no older history was loaded`);
       }
       return `collected ${count} messages (${initial} were rendered before the scan)`;
