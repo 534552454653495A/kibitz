@@ -19,6 +19,13 @@ dir="${1:?usage: upsert-issue.sh <artifacts-dir>}"
 : "${GH_TOKEN:?GH_TOKEN is required}"
 run_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-unknown/unknown}/actions/runs/${GITHUB_RUN_ID:-0}"
 
+# download-artifact creates no directory when zero artefacts matched (probe skipped for
+# missing secrets, or died before reporting); under `set -o pipefail` a failing `find`
+# would turn that into a red report job, so the absence is handled explicitly.
+if [ ! -d "$dir" ]; then
+  echo "no artefact directory at $dir — the probe was skipped or died before reporting; nothing to file" >&2
+  exit 0
+fi
 reports=$(find "$dir" -name probe-report.json | sort)
 if [ -z "$reports" ]; then
   echo "no probe-report.json under $dir — the probe job died before reporting; nothing to file" >&2

@@ -415,3 +415,20 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   nothing. The self-test fixture caught it (50 of 120 collected). → Exhaustion is only
   concluded at `scrollTop === 0` after two empty fetch waits; in-buffer steps wait briefly
   and never count.
+- **2026-09-02 — `if: ${{ secrets.X != '' }}` on a step made canary-probe fail to load.**
+  The `secrets` context is not readable in any `if` (job or step); GitHub then records a
+  failed run under the *file path* instead of the workflow name, on every push, with no
+  log — easy to misread as a failing step. `yaml.safe_load` cannot catch this; only
+  Actions' expression validator can. → Read secrets into a job-level `env:` value and
+  gate steps on `env.HAS_PROBE_SECRETS`; a workflow file edit is verified by pushing a
+  branch and checking that no file-path-named run appears.
+- **2026-09-02 — `.github/scripts/*.sh` were committed as `100644` from Windows.** Git on
+  Windows cannot see the exec bit and records new files non-executable; every direct
+  invocation on `ubuntu-latest` would have died with "Permission denied", and the first
+  casualty would have been `upsert-issue.sh` — a real selector break would have filed
+  nothing. → `git update-index --chmod=+x` on the scripts; `.gitattributes` pins LF so
+  the shebangs survive Windows checkouts; the same dispatch run also showed that
+  `download-artifact` creates no directory for zero matches, which `find` under
+  `pipefail` turned into a red report job → the script now handles the missing directory.
+  Verification that counts for workflow changes: `gh workflow run … --ref <branch>` and
+  read the job conclusions, not a local YAML parse.
