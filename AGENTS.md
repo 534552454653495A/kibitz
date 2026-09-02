@@ -539,3 +539,20 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   Two rules that generalise: **never point a diagnostic at the user's real config file** —
   copy it aside or run the companion with `--settings <temp>`; and **never assert on a
   secret's value** — `hasKey`/`apiKeyLength` is all a check ever needs.
+- **2026-09-02 — Clicking in a virtualised list is a race, and losing it looks like a broken
+  button.** On live Discord `scrollIntoView` + `ElementHandle.click()` put the pointer where
+  the host *had* been; the list had re-rendered, the click landed on `<html>`, the panel
+  never opened, and the run read as a contract failure — a scheduled probe would have filed
+  `auto:broken-selector` and set the fix agent on a phantom. Diagnosis cost an hour because
+  a synthetic `button.click()` worked while a real click did not.
+  → `button-clickable` now samples the click point twice, requires it to hold still and to
+  hit-test to our host, and clicks coordinates rather than a stale handle. When a check
+  cannot find what an earlier check saw, `assertStillOnChannel` decides whether the view
+  simply left the channel (`ProbeSessionError` → `failureKind: session`, no agent) — proven
+  live when the owner navigated Discord mid-run.
+- **2026-09-02 — `ReferenceError: __name is not defined` inside a probe check.** A named
+  inner arrow in a `page.evaluate` callback is compiled by tsx with esbuild's `__name`
+  helper, which does not exist in the page; the check failed in a way that read like broken
+  UI. → No named inner functions in page callbacks — inline the expression. The same trap
+  applies to `\s` inside an evaluate template literal: it resolves to `s`, so
+  `.replace(/\s+/g, " ")` silently deletes every "s" from the result.

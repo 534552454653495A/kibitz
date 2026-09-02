@@ -47,13 +47,28 @@ export interface ProbeCheck {
 }
 
 /**
- * Thrown when the probe never reached a usable channel view — token rejected, login
- * challenge, unreadable channel. That is a *session* failure, not a *contract* failure: the
- * report classifies it (`failureKind: "session"`) so canary-probe files it under a different
- * label and the fix agent is never started on evidence that contains no message list.
+ * Thrown when the probe is not looking at the configured channel — token rejected, login
+ * challenge, unreadable channel, or the view navigated away mid-run. That is a *session*
+ * failure, not a *contract* failure: the report classifies it (`failureKind: "session"`) so
+ * canary-probe files it under a different label and the fix agent is never started on
+ * evidence that contains no message list.
  */
 export class ProbeSessionError extends Error {
   override readonly name = "ProbeSessionError";
+}
+
+/**
+ * Called when a check cannot find what an earlier check already saw. If the view has left
+ * the configured channel, the elements are gone for a reason that no selector fix can
+ * address — measured while sharing a developer's own Discord (2026-09-02): the channel
+ * changed between `button-injected` and `button-clickable`, and without this the run would
+ * have filed `auto:broken-selector` for a phantom.
+ */
+async function assertStillOnChannel(page: Page, channelId: string, what: string): Promise<void> {
+  const path = await page.evaluate(() => location.pathname);
+  if (parseChannelPath(path)?.channelId !== channelId) {
+    throw new ProbeSessionError(`${what}: the view left channel ${channelId} (now at ${path}) — another client or a redirect moved it`);
+  }
 }
 
 /** CDP round-trips are cheap, but tighter polling only speeds up a check by half a tick. */
@@ -98,6 +113,9 @@ function discordDraft(page: Page): Promise<string | null> {
     return box === null ? null : (box.textContent ?? "").replace(/\uFEFF/g, "");
   });
 }
+
+/** Where the last Kibitz button can be clicked, or why it cannot be. */
+type ButtonSpot = { x: number; y: number; messageId: string } | { error: string };
 
 async function ensureHelper(ctx: ProbeContext): Promise<void> {
   const present = await ctx.page.evaluate(() => window.__kibitzProbe !== undefined);
@@ -264,34 +282,64 @@ export const CHECKS: ProbeCheck[] = [
   },
   {
     id: "button-clickable",
-    description: "the last button host is unobstructed in the viewport and accepts a click",
-    timeoutMs: 15_000,
+    description: "the last button host is unobstructed in the viewport and accepts a real click",
+    timeoutMs: 30_000,
+    /**
+     * Clicking in a virtualised list is a race, and losing it looks exactly like a broken
+     * button. Measured on live Discord (2026-09-02): `scrollIntoView` then click put the
+     * pointer where the host *had* been — the list had re-rendered and the click landed on
+     * `<html>`, so the panel never opened and the run looked like a contract failure. A red
+     * probe files `auto:broken-selector` and sends the fix agent after a selector that never
+     * broke, so the click waits until the same coordinates hold still across two samples and
+     * still hit-test to our host, and it clicks the coordinates rather than a stale handle.
+     */
     async run(ctx) {
-      const { page } = ctx;
-      const target = await page.evaluate((hostAttr: string) => {
-        const hosts = document.querySelectorAll(`[${hostAttr}]`);
-        const host = hosts[hosts.length - 1];
-        if (!host) return { error: "no button host in DOM" };
-        host.scrollIntoView({ block: "center" });
-        const r = host.getBoundingClientRect();
-        const inViewport = r.top >= 0 && r.left >= 0 && r.bottom <= innerHeight && r.right <= innerWidth;
-        if (!inViewport) return { error: `host outside viewport after scrollIntoView: ${JSON.stringify(r)}` };
-        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-        if (!hit || !(hit === host || host.contains(hit))) {
-          const desc = hit ? `${hit.tagName.toLowerCase()}#${hit.id}` : "nothing";
-          return { error: `button host is covered by ${desc}` };
-        }
-        return { messageId: host.getAttribute(hostAttr) ?? "" };
-      }, BUTTON_HOST_ATTR);
-      if ("error" in target) throw new Error(target.error);
-      if (!target.messageId) throw new Error(`button host has an empty ${BUTTON_HOST_ATTR}`);
+      const { page, channelId } = ctx;
+      // No named inner functions inside a page callback: tsx compiles them with esbuild's
+      // `__name` helper, which does not exist in the page — the call fails with
+      // "ReferenceError: __name is not defined" and reads like a broken button.
+      const spot = (): Promise<ButtonSpot> =>
+        page.evaluate((hostAttr: string) => {
+          const hosts = document.querySelectorAll(`[${hostAttr}]`);
+          const host = hosts[hosts.length - 1];
+          if (!host) return { error: "no button host in DOM" };
+          // A host near the top bar or behind the message box cannot be clicked reliably.
+          const initial = host.getBoundingClientRect();
+          if (initial.top < 80 || initial.bottom > innerHeight - 120) host.scrollIntoView({ block: "center" });
+          const r = host.getBoundingClientRect();
+          const x = Math.round(r.left + r.width / 2);
+          const y = Math.round(r.top + r.height / 2);
+          const hit = document.elementFromPoint(x, y);
+          if (!hit || !(hit === host || host.contains(hit))) {
+            return { error: `button host is covered by ${hit ? `${hit.tagName.toLowerCase()}#${hit.id}` : "nothing"}` };
+          }
+          return { x, y, messageId: host.getAttribute(hostAttr) ?? "" };
+        }, BUTTON_HOST_ATTR);
 
-      const handle: ElementHandle | null = await page.$(`[${BUTTON_HOST_ATTR}="${target.messageId}"]`);
-      if (!handle) throw new Error(`button host for ${target.messageId} vanished before click`);
-      await handle.click();
-      await handle.dispose();
-      ctx.clickedMessageId = target.messageId;
-      return `clicked button of ${target.messageId}`;
+      let last = "never sampled";
+      for (let attempt = 0; attempt < 12; attempt++) {
+        const first = await spot();
+        await setTimeout(POLL_INTERVAL_MS);
+        const second = await spot();
+        if ("error" in first) {
+          last = first.error;
+          continue;
+        }
+        if ("error" in second) {
+          last = second.error;
+          continue;
+        }
+        if (first.x !== second.x || first.y !== second.y) {
+          last = `still moving: (${first.x},${first.y}) → (${second.x},${second.y})`;
+          continue;
+        }
+        if (!second.messageId) throw new Error(`button host has an empty ${BUTTON_HOST_ATTR}`);
+        await page.mouse.click(second.x, second.y);
+        ctx.clickedMessageId = second.messageId;
+        return `clicked button of ${second.messageId} at (${second.x},${second.y}) after ${attempt + 1} settle attempt(s)`;
+      }
+      await assertStillOnChannel(page, channelId, "button-clickable");
+      throw new Error(`no button host held still long enough to click: ${last}`);
     },
   },
   {
@@ -345,9 +393,12 @@ export const CHECKS: ProbeCheck[] = [
      * `auto:broken-selector` and sending the fix agent after a selector that never broke.
      * A delta still catches a real leak and is immune to whatever the channel already had.
      */
-    async run({ page }) {
+    async run({ page, channelId }) {
       const settingsTab: ElementHandle | null = await page.$(`[${PANEL_HOST_ATTR}] >>> [${ACTION_ATTR}="view-settings"]`);
-      if (!settingsTab) throw new Error(`no [${ACTION_ATTR}="view-settings"] in the panel`);
+      if (!settingsTab) {
+        await assertStillOnChannel(page, channelId, "panel-input");
+        throw new Error(`no [${ACTION_ATTR}="view-settings"] in the panel`);
+      }
       await settingsTab.click();
       await settingsTab.dispose();
 
@@ -389,10 +440,13 @@ export const CHECKS: ProbeCheck[] = [
     id: "scroll-back",
     description: "scan related messages scrolls back and collects more than what was rendered",
     timeoutMs: 90_000,
-    async run({ page }) {
+    async run({ page, channelId }) {
       const initial = (await renderedItemIds(page)).length;
       const scan: ElementHandle | null = await page.$(`[${PANEL_HOST_ATTR}] >>> [${ACTION_ATTR}="scan"]`);
-      if (!scan) throw new Error(`no [${ACTION_ATTR}="scan"] inside the panel's shadow root`);
+      if (!scan) {
+        await assertStillOnChannel(page, channelId, "scroll-back");
+        throw new Error(`no [${ACTION_ATTR}="scan"] inside the panel's shadow root`);
+      }
       await scan.click();
       await scan.dispose();
 
@@ -414,6 +468,7 @@ export const CHECKS: ProbeCheck[] = [
       );
       const count = Number(done.count);
       if (!Number.isFinite(count) || count <= initial) {
+        await assertStillOnChannel(page, channelId, "scroll-back");
         throw new Error(`scan collected ${done.count ?? "?"} messages but ${initial} were already rendered — no older history was loaded`);
       }
       return `collected ${count} messages (${initial} were rendered before the scan)`;
