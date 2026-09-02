@@ -15,6 +15,10 @@ on:
       - "probe/**"
       - "package.json"
       - "package-lock.json"
+      # The workflow gates edits to itself and to the scripts it invokes; otherwise a broken
+      # report step ships unexercised and surfaces six hours later on the schedule.
+      - ".github/workflows/canary-probe.yml"
+      - ".github/scripts/**"
   workflow_dispatch:
     inputs:
       branch:
