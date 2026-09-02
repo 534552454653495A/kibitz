@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendExplain,
   appendFollowUp,
   buildExplainMessages,
   buildSynthesisMessages,
@@ -146,5 +147,38 @@ describe("appendFollowUp", () => {
     expect(history).toHaveLength(1);
     expect(next).toHaveLength(2);
     expect(next[1]).toEqual({ role: "user", content: "why?" });
+  });
+});
+
+// Failure mode defended: a second click on the same author's message must ADD to the
+// conversation. Rebuilding it would drop the earlier exchange, which is exactly the panel
+// restart the owner asked us to stop doing.
+describe("appendExplain", () => {
+  const history: ChatMessage[] = [
+    { role: "system", content: "rules" },
+    { role: "user", content: "explain 42" },
+    { role: "assistant", content: "it means this" },
+  ];
+
+  it("adds one user turn carrying the new message and keeps the exchange before it", () => {
+    const out = appendExplain(history, { ...message, id: "43", content: "ikinci mesaj" });
+    expect(out.map((m) => m.role)).toEqual(["system", "user", "assistant", "user"]);
+    expect(out.slice(0, 3)).toEqual(history);
+    expect(out[3]?.content).toContain("ikinci mesaj");
+  });
+
+  it("does not mutate the history it was given, so an aborted request leaves the panel intact", () => {
+    appendExplain(history, { ...message, id: "43" });
+    expect(history).toHaveLength(3);
+  });
+
+  it("builds a whole request when there is no history yet, e.g. the first answer never ran", () => {
+    expect(appendExplain([], message).map((m) => m.role)).toEqual(["system", "user"]);
+  });
+
+  it("carries the new message's own images, capped like any other request", () => {
+    const many = Array.from({ length: MAX_IMAGES_PER_REQUEST + 3 }, (_unused, i) => image(`i${i}`));
+    const out = appendExplain(history, { ...message, id: "43", attachments: many });
+    expect(out[3]?.images).toHaveLength(MAX_IMAGES_PER_REQUEST);
   });
 });

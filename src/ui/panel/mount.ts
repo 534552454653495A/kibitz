@@ -18,7 +18,7 @@
 import { h, render } from "preact";
 import type { PlatformAdapter } from "../../core/adapter";
 import type { ChatMessage } from "../../core/messaging";
-import { appendFollowUp, buildExplainMessages, buildSynthesisMessages } from "../../core/prompt";
+import { appendExplain, appendFollowUp, buildExplainMessages, buildSynthesisMessages } from "../../core/prompt";
 import { originPattern } from "../../core/settings";
 import type { MessageRef, UniversalMessage } from "../../core/types";
 import {
@@ -39,7 +39,7 @@ import type { PanelActions } from "./actions";
 import { clampLayout, installLayoutController, parseLayoutState, UI_STATE_LAYOUT_KEY } from "./layout";
 import { DEFAULT_LAYOUT_STATE, type LayoutState, type Viewport } from "./layout-model";
 import panelCss from "./panel.css";
-import { INITIAL, reduce, type PanelAction, type PanelModel } from "./state";
+import { INITIAL, isTextTurn, reduce, type PanelAction, type PanelModel } from "./state";
 
 export interface PanelHandle {
   open(ref: MessageRef): void;
@@ -221,17 +221,26 @@ export function mountPanel(adapter: PlatformAdapter, shell: Shell): PanelHandle 
     }
   }
 
-  async function openFlow(ref: MessageRef, owner: number): Promise<void> {
-    // Settings and the message load in parallel; "ready" waits only for the message so
-    // the probe (and the user) see the card even when the background is slow.
-    const settings = shell.settingsStatus().then(
+  /** Settings and the message load in parallel; "ready" waits only for the message. */
+  function settingsPromise(): Promise<boolean> {
+    return shell.settingsStatus().then(
       (s) => s.configured,
       (err: unknown) => {
         log.warn("settings-status failed", err);
         return false;
       },
     );
+  }
 
+  async function finishExplain(history: ChatMessage[], settings: Promise<boolean>, owner: number): Promise<void> {
+    const configured = await settings;
+    if (owner !== session) return;
+    dispatch({ type: "settings", configured });
+    if (configured) await stream(history, owner);
+  }
+
+  async function openFlow(ref: MessageRef, owner: number): Promise<void> {
+    const settings = settingsPromise();
     let message: UniversalMessage;
     try {
       message = await adapter.readMessage(ref);
@@ -243,11 +252,41 @@ export function mountPanel(adapter: PlatformAdapter, shell: Shell): PanelHandle 
     }
     if (owner !== session) return;
     dispatch({ type: "loaded", message });
+    await finishExplain(buildExplainMessages(message), settings, owner);
+  }
 
-    const configured = await settings;
+  /**
+   * A second click while a conversation is open. The message is read FIRST, because the
+   * author is the deciding fact and only the read knows it: same person (and same channel)
+   * means this message joins the conversation, anyone else means a fresh one.
+   *
+   * The channel is part of the test on purpose. The same person's messages in another server
+   * are another subject, and folding them into one prompt would quietly ship one server's
+   * content as context for a question about another.
+   */
+  async function continueFlow(ref: MessageRef, owner: number, authorId: string): Promise<void> {
+    const settings = settingsPromise();
+    let message: UniversalMessage;
+    try {
+      message = await adapter.readMessage(ref);
+    } catch (err) {
+      if (owner !== session) return;
+      log.warn("readMessage failed", err);
+      // A note, not `load-failed`: the conversation on screen is still valid and the user
+      // has not lost it. `load-failed` would replace it with "could not read this message".
+      dispatch({ type: "note", text: `Could not read that message: ${describeError(err)}` });
+      return;
+    }
     if (owner !== session) return;
-    dispatch({ type: "settings", configured });
-    if (configured) await stream(buildExplainMessages(message), owner);
+    if (message.author.id !== authorId) {
+      dispatch({ type: "open", ref });
+      dispatch({ type: "loaded", message });
+      await finishExplain(buildExplainMessages(message), settings, owner);
+      return;
+    }
+    const history = appendExplain(model.history, message);
+    dispatch({ type: "continue", ref, message });
+    await finishExplain(history, settings, owner);
   }
 
   async function scanFlow(ref: MessageRef, owner: number): Promise<void> {
@@ -429,7 +468,9 @@ export function mountPanel(adapter: PlatformAdapter, shell: Shell): PanelHandle 
     },
     copyTurn(index) {
       const turn = model.turns[index];
-      if (turn === undefined) return;
+      // A card has no text to copy; the button only exists on answers, so this is a guard
+      // against a stale index (the transcript grows while a click is in flight), not a case.
+      if (turn === undefined || !isTextTurn(turn)) return;
       void copyText(turn.text);
     },
   };
@@ -482,9 +523,21 @@ export function mountPanel(adapter: PlatformAdapter, shell: Shell): PanelHandle 
 
   return {
     open(ref) {
+      const sameMessage = model.ref?.messageId === ref.messageId && model.ref?.channelId === ref.channelId;
+      // The button of a message that is already answered: keep what is on screen. Re-asking
+      // the same question would cost the user a second request for the same answer.
+      if (sameMessage && model.status === "ready") return;
+      // Another message while a conversation is open, in the same channel: it MIGHT belong to
+      // the same author, which only the read can tell (see continueFlow).
+      const mayContinue = model.status === "ready" && model.message !== null && model.ref?.channelId === ref.channelId;
+      const authorId = model.message?.author.id;
       session += 1;
       stopStream();
       stopScan();
+      if (mayContinue && authorId !== undefined) {
+        void continueFlow(ref, session, authorId);
+        return;
+      }
       dispatch({ type: "open", ref });
       void openFlow(ref, session);
     },

@@ -649,3 +649,16 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   The same trap exists for the extension with a different remedy: `chrome://extensions` → ↻
   and reload the Discord tab. Any report of the shape "my change is not there" starts by
   checking which build is actually running.
+- **2026-09-03 — One conversation per author, not per message (owner's request).** Clicking ✦
+  on a second message re-mounted the panel: the previous cards, answers and the history the
+  model had already been given were thrown away, so asking about three messages from one
+  person cost three cold starts and the model could never connect them.
+  → `open()` (`src/ui/panel/mount.ts`) reads the message **first**, because the author is the
+  deciding fact and only the read knows it, then either `continue` (same author, same channel)
+  or restarts. `Turn` is a union and a message card is a turn, so cards sit inside the
+  transcript in click order — a fixed card above the conversation could only ever show one.
+  The channel is part of the test deliberately: the same person's messages in another server
+  are another subject, and folding them into one prompt would ship one server's content as
+  context for a question about another. Clicking the ✦ of the message already answered does
+  nothing at all — re-asking would bill the user twice for an answer already on screen.
+  Mutation-checked: forcing the restart path fails 2 tests, ignoring the author check fails 1.

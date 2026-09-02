@@ -274,6 +274,96 @@ describe("mountPanel host attributes", () => {
   });
 });
 
+// Failure mode defended: the owner clicks ✦ on several messages from the same person while
+// reading a thread. Restarting the panel each time threw away the conversation (and the
+// context the model had already been given) - so same author + same channel must append.
+describe("mountPanel same-author conversation", () => {
+  const second: UniversalMessage = { ...message, id: "m2", content: "and another thing" };
+  const otherPerson: UniversalMessage = { ...message, id: "m3", author: { id: "u2", name: "Bob", isBot: false }, content: "unrelated" };
+  const byId = (...messages: UniversalMessage[]): PlatformAdapter =>
+    adapter({
+      readMessage: (r) => {
+        const found = messages.find((m) => m.id === r.messageId);
+        return found === undefined ? Promise.reject(new Error(`no fixture for ${r.messageId}`)) : Promise.resolve(found);
+      },
+    });
+  const cards = (): number => host().shadowRoot?.querySelectorAll("section.card").length ?? 0;
+
+  it("keeps the conversation and appends the second message's card and answer", async () => {
+    const panel = mountPanel(byId(message, second), createExtensionShell());
+    panel.open(ref);
+    await settleFirstAnswer("It says hi.");
+    expect(cards()).toBe(1);
+
+    panel.open({ ...ref, messageId: "m2" });
+    const next = await untilPort(1);
+    const request = next.sent[0];
+    if (request?.type !== "chat") throw new Error("expected a chat request");
+    // The model keeps everything it was already told: the first exchange is still there and
+    // the new message arrives as one more user turn.
+    expect(request.messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "user"]);
+    expect(request.messages[3]?.content).toContain("and another thing");
+    await vi.waitFor(() => expect(cards()).toBe(2));
+    // The first answer is still on screen - that is the whole point.
+    expect(host().shadowRoot?.textContent).toContain("It says hi.");
+    expect(host().getAttribute(PANEL_MESSAGE_ATTR)).toBe("m2");
+  });
+
+  it("starts over for a different author instead of mixing two people in one thread", async () => {
+    const panel = mountPanel(byId(message, otherPerson), createExtensionShell());
+    panel.open(ref);
+    await settleFirstAnswer("It says hi.");
+
+    panel.open({ ...ref, messageId: "m3" });
+    const next = await untilPort(1);
+    const request = next.sent[0];
+    if (request?.type !== "chat") throw new Error("expected a chat request");
+    expect(request.messages.map((m) => m.role)).toEqual(["system", "user"]);
+    await vi.waitFor(() => expect(host().shadowRoot?.textContent).toContain("unrelated"));
+    expect(cards()).toBe(1);
+    expect(host().shadowRoot?.textContent).not.toContain("It says hi.");
+  });
+
+  it("starts over for the same author in another channel, so one server's context cannot leak into another", async () => {
+    const elsewhere: UniversalMessage = { ...message, id: "m9", channel: { id: "c2" }, content: "same person, other server" };
+    const panel = mountPanel(byId(message, elsewhere), createExtensionShell());
+    panel.open(ref);
+    await settleFirstAnswer("It says hi.");
+
+    panel.open({ platform: "discord", channelId: "c2", messageId: "m9" });
+    const next = await untilPort(1);
+    const request = next.sent[0];
+    if (request?.type !== "chat") throw new Error("expected a chat request");
+    expect(request.messages.map((m) => m.role)).toEqual(["system", "user"]);
+    expect(cards()).toBe(1);
+  });
+
+  it("does nothing when the button of the message already answered is clicked again", async () => {
+    const panel = mountPanel(byId(message), createExtensionShell());
+    panel.open(ref);
+    await settleFirstAnswer("It says hi.");
+
+    panel.open(ref);
+    // No second request: the answer is already on screen and re-asking would bill the user
+    // twice for it.
+    expect(fakeRuntime.ports).toHaveLength(1);
+    expect(host().shadowRoot?.textContent).toContain("It says hi.");
+    expect(cards()).toBe(1);
+  });
+
+  it("keeps the conversation when reading the next message fails, instead of replacing it with an error", async () => {
+    const panel = mountPanel(byId(message), createExtensionShell());
+    panel.open(ref);
+    await settleFirstAnswer("It says hi.");
+
+    panel.open({ ...ref, messageId: "m2" });
+    await vi.waitFor(() => expect(host().shadowRoot?.textContent).toContain("Could not read that message"));
+    expect(host().getAttribute(PANEL_STATE_ATTR)).toBe("ready");
+    expect(host().shadowRoot?.textContent).toContain("It says hi.");
+    expect(cards()).toBe(1);
+  });
+});
+
 describe("mountPanel composer", () => {
   it("sends what was typed as a follow-up chat request when Enter is pressed", async () => {
     const panel = mountPanel(adapter(), createExtensionShell());

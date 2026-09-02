@@ -62,14 +62,32 @@ function withImages(content: string, picked: UniversalAttachment[]): ChatMessage
   return { role: "user", content, images: picked.map(toChatImage) };
 }
 
-export function buildExplainMessages(m: UniversalMessage): ChatMessage[] {
+/**
+ * The user turn that asks about one message. Split out because a conversation can now cover
+ * several messages from the same author: the first click builds the whole request, a later
+ * click on another message by the same person appends one of these to the history it already
+ * has, so the model keeps everything it has been told instead of starting over.
+ */
+function explainTurn(m: UniversalMessage): ChatMessage {
   const picked = imagesOf(m).slice(0, MAX_IMAGES_PER_REQUEST);
   const attachedImageIds = new Set(picked.map((a) => a.id));
   const content = renderTemplate(explainTemplate, {
     platform: m.platform,
     message: serializeMessage(m, { attachedImageIds }),
   });
-  return [{ role: "system", content: systemPrompt }, withImages(content, picked)];
+  return withImages(content, picked);
+}
+
+export function buildExplainMessages(m: UniversalMessage): ChatMessage[] {
+  return [{ role: "system", content: systemPrompt }, explainTurn(m)];
+}
+
+/**
+ * Adds another message to an existing conversation. Returns a new history; the caller keeps
+ * the old one, which is what makes an abort or a failure leave the panel exactly as it was.
+ */
+export function appendExplain(history: ChatMessage[], m: UniversalMessage): ChatMessage[] {
+  return history.length === 0 ? buildExplainMessages(m) : [...history, explainTurn(m)];
 }
 
 /**

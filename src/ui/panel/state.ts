@@ -18,9 +18,19 @@ import type { SettingsDraft } from "../../shell/types";
 import { DEFAULT_LAYOUT_STATE, type LayoutState } from "./layout-model";
 import type { PanelView } from "./views";
 
-export interface Turn {
-  role: "user" | "assistant" | "note" | "error";
-  text: string;
+/**
+ * One entry in the transcript, in render order. A message card is a turn like any other
+ * because a conversation can cover several messages: clicking a second message by the same
+ * author appends its card and its answer under the first instead of replacing the panel
+ * (owner's request, 2026-09-03). A fixed card above the turns could only ever show one.
+ */
+export type Turn =
+  | { role: "user" | "assistant" | "note" | "error"; text: string }
+  | { role: "message"; message: UniversalMessage };
+
+/** Narrowing helper: the text roles are the ones that carry `text`. */
+export function isTextTurn(turn: Turn): turn is { role: "user" | "assistant" | "note" | "error"; text: string } {
+  return turn.role !== "message";
 }
 
 /** Everything the in-panel settings form needs that is not the form's own field values. */
@@ -40,6 +50,11 @@ export interface PanelModel {
   /** Which registered view is showing; mirrored to VIEW_ATTR. */
   view: PanelView["id"];
   layout: LayoutState;
+  /**
+   * The **current** anchor: what a follow-up, a retry and a scan act on, and what
+   * PANEL_MESSAGE_ATTR reports. Not the transcript — a conversation that has collected
+   * several messages keeps each one's card in `turns`, and this points at the last click.
+   */
   ref: MessageRef | null;
   message: UniversalMessage | null;
   /** `${err.name}: ${err.message}` of a read failure; mirrored to PANEL_ERROR_ATTR. */
@@ -75,6 +90,12 @@ export type PanelAction =
   | { type: "open"; ref: MessageRef }
   | { type: "close" }
   | { type: "loaded"; message: UniversalMessage }
+  /**
+   * Another message joins the open conversation: same author, same channel. Keeps `turns`
+   * and `history` and moves the anchor, which is what makes the answers stack instead of
+   * the panel restarting.
+   */
+  | { type: "continue"; ref: MessageRef; message: UniversalMessage }
   | { type: "load-failed"; error: string }
   | { type: "settings"; configured: boolean }
   | { type: "stream-start"; history: ChatMessage[] }
@@ -125,7 +146,19 @@ export function reduce(model: PanelModel, action: PanelAction): PanelModel {
     case "close":
       return resetFor(model, "closed", null);
     case "loaded":
-      return { ...model, status: "ready", message: action.message, error: null };
+      // The card enters the transcript here, so the first message and every later one are
+      // rendered by the same code path in the same order they were asked about.
+      return { ...model, status: "ready", message: action.message, error: null, turns: [{ role: "message", message: action.message }] };
+    case "continue":
+      return {
+        ...model,
+        status: "ready",
+        ref: action.ref,
+        message: action.message,
+        error: null,
+        scan: { state: "idle", count: 0 },
+        turns: [...model.turns, { role: "message", message: action.message }],
+      };
     case "load-failed":
       return { ...model, status: "error", error: action.error };
     case "settings":
@@ -144,7 +177,7 @@ export function reduce(model: PanelModel, action: PanelAction): PanelModel {
         ...model,
         streaming: false,
         configured: action.unconfigured ? false : model.configured,
-        turns: [...model.turns.filter((t) => t.role !== "assistant" || t.text !== ""), { role: "error", text: action.error }],
+        turns: [...model.turns.filter((t) => t.role !== "assistant" || t.text.length > 0), { role: "error", text: action.error }],
       };
     case "retry": {
       const last = model.turns[model.turns.length - 1];

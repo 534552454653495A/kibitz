@@ -56,7 +56,9 @@ function show(attachments: UniversalAttachment[]): string[] {
   };
   render(
     chatView.render({
-      model: { ...INITIAL, status: "ready", view: "chat", message },
+      // The card lives in the transcript now (a conversation can hold several), so seeding
+      // `message` alone would render no card at all.
+      model: { ...INITIAL, status: "ready", view: "chat", message, turns: [{ role: "message", message }] },
       actions: stubActions(),
       platform: "discord",
       capabilities: { keyIsPageVisible: false, canOpenOptionsPage: true },

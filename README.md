@@ -125,6 +125,12 @@ of the two you are in.
 
 1. Open any Discord channel. Every message gets a small ✦ at the end of its text.
 2. Click ✦. The panel opens and the AI explains the message.
+   Clicking ✦ on **another message from the same person in the same channel** adds it to the
+   same conversation instead of starting over: its card appears under the previous answer and
+   the AI keeps everything it was already told, so you can ask about three of someone's
+   messages and get one thread that connects them. A different person — or the same person in
+   another channel — starts a fresh conversation, and clicking the ✦ of a message that is
+   already answered does nothing.
 3. Ask follow-ups at the bottom — `Enter` sends, `Shift+Enter` is a newline,
    `Ctrl/Cmd+Enter` sends from anywhere in the panel. **Stop** interrupts a running answer;
    **Retry** re-sends the last failed one; each answer has a copy button.

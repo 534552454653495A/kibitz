@@ -103,37 +103,43 @@ function Conversation({ turns, actions }: { turns: Turn[]; actions: PanelActions
         following.current = el.scrollHeight - el.scrollTop - el.clientHeight < FOLLOW_SLACK_PX;
       }}
     >
-      {turns.map((turn, index) => (
-        <div class={`turn ${turn.role}`} key={index}>
-          {turn.role === "assistant" ? (
-            turn.text === "" ? (
-              <span class="dots" aria-label="waiting for the model">
-                ···
-              </span>
+      {turns.map((turn, index) =>
+        turn.role === "message" ? (
+          // A card in the flow, not a header: a conversation can cover several messages by
+          // the same author, and each answer has to sit under the message it answers.
+          <MessageCard message={turn.message} key={`card-${turn.message.id}`} />
+        ) : (
+          <div class={`turn ${turn.role}`} key={index}>
+            {turn.role === "assistant" ? (
+              turn.text === "" ? (
+                <span class="dots" aria-label="waiting for the model">
+                  ···
+                </span>
+              ) : (
+                renderMarkdown(turn.text)
+              )
             ) : (
-              renderMarkdown(turn.text)
-            )
-          ) : (
-            turn.text
-          )}
-          {turn.role === "assistant" && turn.text !== "" && (
-            <button
-              class="turn-action"
-              {...{ [ACTION_ATTR]: "copy-turn" }}
-              title="Copy this answer"
-              aria-label="Copy this answer"
-              onClick={() => actions.copyTurn(index)}
-            >
-              ⧉
-            </button>
-          )}
-          {turn.role === "error" && index === lastIndex && (
-            <button class="turn-action" {...{ [ACTION_ATTR]: "retry" }} title="Try again" onClick={actions.retry}>
-              ↻ Retry
-            </button>
-          )}
-        </div>
-      ))}
+              turn.text
+            )}
+            {turn.role === "assistant" && turn.text !== "" && (
+              <button
+                class="turn-action"
+                {...{ [ACTION_ATTR]: "copy-turn" }}
+                title="Copy this answer"
+                aria-label="Copy this answer"
+                onClick={() => actions.copyTurn(index)}
+              >
+                ⧉
+              </button>
+            )}
+            {turn.role === "error" && index === lastIndex && (
+              <button class="turn-action" {...{ [ACTION_ATTR]: "retry" }} title="Try again" onClick={actions.retry}>
+                ↻ Retry
+              </button>
+            )}
+          </div>
+        ),
+      )}
     </div>
   );
 }
@@ -200,7 +206,6 @@ function ChatView({ ctx }: { ctx: PanelContext }) {
           {model.error}
         </div>
       )}
-      {model.message !== null && <MessageCard message={model.message} />}
 
       {model.status === "ready" && model.configured === false && (
         <div class="cta">

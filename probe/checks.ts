@@ -117,6 +117,269 @@ function panelAttr(page: Page, attr: string): Promise<string | null> {
 }
 
 /**
+ * Clicks the ✦ of one message and reports where the click landed.
+ *
+ * Clicking in a virtualised list is a race, and losing it looks exactly like a broken
+ * button. Measured on live Discord (2026-09-02): `scrollIntoView` then click put the
+ * pointer where the host *had* been — the list had re-rendered and the click landed on
+ * `<html>`, so the panel never opened and the run looked like a contract failure. A red
+ * probe files `auto:broken-selector` and sends the fix agent after a selector that never
+ * broke, so the click waits until the same coordinates hold still across two samples and
+ * still hit-test to our host, and it clicks the coordinates rather than a stale handle.
+ *
+ * Two further measured causes of a covered target, both transient, both retried with the
+ * pointer parked in a corner first: Discord puts a transparent full-viewport `fixed` div
+ * behind an open context menu to catch the dismissing click, and hovering a message
+ * raises its action toolbar. The covering element is described in full (tag, role,
+ * aria-label, data-*, rect) because that string is the evidence the fix agent reads —
+ * `div#` with an empty id, which is every Discord element, tells nobody anything.
+ *
+ * `messageId === null` means "whichever ✦ is last in the DOM", which is all
+ * `button-clickable` needs; a named message is what `same-author-continues` needs. Both go
+ * through this one loop, so the race above stays solved in exactly one place.
+ */
+async function settledClick(
+  page: Page,
+  messageId: string | null,
+): Promise<{ x: number; y: number; messageId: string; attempts: number }> {
+  // No named inner functions inside a page callback: tsx compiles them with esbuild's
+  // `__name` helper, which does not exist in the page — the call fails with
+  // "ReferenceError: __name is not defined" and reads like a broken button.
+  const spot = (): Promise<ButtonSpot> =>
+    page.evaluate(
+      (hostAttr: string, wanted: string | null) => {
+        const hosts = document.querySelectorAll(`[${hostAttr}]`);
+        const host = wanted === null ? hosts[hosts.length - 1] : document.querySelector(`[${hostAttr}="${wanted}"]`);
+        if (!host) {
+          return { error: wanted === null ? "no button host in DOM" : `no button host for message ${wanted} in DOM` };
+        }
+        // A host near the top bar or behind the message box cannot be clicked reliably.
+        const initial = host.getBoundingClientRect();
+        if (initial.top < 80 || initial.bottom > innerHeight - 120) host.scrollIntoView({ block: "center" });
+        const r = host.getBoundingClientRect();
+        const x = Math.round(r.left + r.width / 2);
+        const y = Math.round(r.top + r.height / 2);
+        const hit = document.elementFromPoint(x, y);
+        if (!hit || !(hit === host || host.contains(hit))) {
+          if (!hit) return { error: `nothing hit-tests at the button host (${x},${y})` };
+          const hr = hit.getBoundingClientRect();
+          const data = Array.from(hit.attributes)
+            .filter((a) => a.name.startsWith("data-") || a.name === "role" || a.name === "aria-label")
+            .map((a) => `${a.name}=${a.value.slice(0, 32)}`)
+            .join(" ");
+          const fullViewport = Math.round(hr.width) >= innerWidth && Math.round(hr.height) >= innerHeight;
+          return {
+            error:
+              `button host at (${x},${y}) size ${Math.round(r.width)}x${Math.round(r.height)} is covered by ` +
+              `<${hit.tagName.toLowerCase()}${data ? ` ${data}` : ""}> at ` +
+              `${Math.round(hr.left)},${Math.round(hr.top)} ${Math.round(hr.width)}x${Math.round(hr.height)}` +
+              `${fullViewport ? " — a full-viewport layer (open context menu or modal backdrop)" : ""}` +
+              ` [position:${getComputedStyle(hit).position} pointer-events:${getComputedStyle(hit).pointerEvents}]`,
+          };
+        }
+        return { x, y, messageId: host.getAttribute(hostAttr) ?? "" };
+      },
+      BUTTON_HOST_ATTR,
+      messageId,
+    );
+
+  let last = "never sampled";
+  for (let attempt = 0; attempt < 12; attempt++) {
+    // Park the pointer away from the list first: a hover toolbar or a popout that a
+    // previous attempt's own mouse move opened would otherwise cover the target for
+    // every remaining attempt.
+    if (attempt > 0) {
+      await page.mouse.move(4, 4);
+      await setTimeout(POLL_INTERVAL_MS);
+    }
+    const first = await spot();
+    await setTimeout(POLL_INTERVAL_MS);
+    const second = await spot();
+    if ("error" in first) {
+      last = first.error;
+      continue;
+    }
+    if ("error" in second) {
+      last = second.error;
+      continue;
+    }
+    if (first.x !== second.x || first.y !== second.y) {
+      last = `still moving: (${first.x},${first.y}) → (${second.x},${second.y})`;
+      continue;
+    }
+    if (!second.messageId) throw new Error(`button host has an empty ${BUTTON_HOST_ATTR}`);
+    await page.mouse.click(second.x, second.y);
+    return { x: second.x, y: second.y, messageId: second.messageId, attempts: attempt + 1 };
+  }
+  throw new Error(`no button host held still long enough to click: ${last}`);
+}
+
+/** The panel's mirrored state, as the host attributes report it. */
+interface PanelObservation {
+  state: string | null;
+  messageId: string | null;
+  error: string | null;
+}
+
+/**
+ * Waits until the panel says "ready, for this message" — the only honest signal that a
+ * click was taken (a "loading" panel is still reading, an "error" one never will be).
+ * Shared by `panel-opens` and `same-author-continues` so a second click is judged against
+ * the same state machine as the first: two spellings of "the panel came up" could disagree,
+ * and then one of the two checks would be measuring nothing.
+ */
+function panelReadyFor(page: Page, messageId: string, timeoutMs: number): Promise<PanelObservation> {
+  const observe = (): Promise<PanelObservation | null> =>
+    page.evaluate(
+      (hostAttr: string, stateAttr: string, msgAttr: string, errAttr: string) => {
+        const host = document.querySelector(`[${hostAttr}]`);
+        return host
+          ? { state: host.getAttribute(stateAttr), messageId: host.getAttribute(msgAttr), error: host.getAttribute(errAttr) }
+          : null;
+      },
+      PANEL_HOST_ATTR,
+      PANEL_STATE_ATTR,
+      PANEL_MESSAGE_ATTR,
+      PANEL_ERROR_ATTR,
+    );
+  return until(
+    `[${PANEL_HOST_ATTR}] ${PANEL_STATE_ATTR}=ready for ${messageId}`,
+    timeoutMs,
+    async () => {
+      const s = await observe();
+      if (!s) return null;
+      if (s.state === "error") throw new Error(`panel state error: ${s.error ?? "(no detail)"}`);
+      return s.state === "ready" && s.messageId === messageId ? s : null;
+    },
+    async () => JSON.stringify(await observe()),
+  );
+}
+
+/** What the panel is showing, read the way a user reads it. */
+interface Transcript {
+  /** One entry per `section.card` in render order: the card's message text. */
+  cards: string[];
+  /** The whole conversation column as text. */
+  text: string;
+}
+
+/**
+ * Reads the transcript out of the panel's shadow root.
+ *
+ * `section.card`, `.content` and `.conversation` are OUR class names inside OUR shadow
+ * tree — the one place class names are allowed, because nothing here is Discord's markup
+ * (§3.6 is about binding to Discord, and every such hook still comes from selectors.ts).
+ *
+ * The card's `.content` is read rather than the whole card because a card also prints a
+ * relative timestamp: "just now" becomes "1m ago" while the check runs, so comparing whole
+ * cards across two reads would eventually fail on the clock rather than on the behaviour.
+ */
+function panelTranscript(page: Page): Promise<Transcript> {
+  return page.evaluate((hostAttr: string) => {
+    const root = document.querySelector(`[${hostAttr}]`)?.shadowRoot ?? null;
+    if (root === null) return { cards: [], text: "" };
+    return {
+      cards: Array.from(root.querySelectorAll("section.card"), (card) => (card.querySelector(".content")?.textContent ?? "").trim()),
+      text: (root.querySelector(".conversation")?.textContent ?? "").trim(),
+    };
+  }, PANEL_HOST_ATTR);
+}
+
+/** Two messages by one author, both with a ✦ a user could click right now. */
+interface SameAuthorPair {
+  firstId: string;
+  secondId: string;
+  authorName: string;
+  /** How many ✦ there were to choose from; the number belongs in the failure sentence. */
+  candidates: number;
+}
+
+/**
+ * Finds that pair, or explains why the page cannot prove anything about continuation.
+ *
+ * The author comes from the bridge (`readMessages` — the same RPC the adapter reads
+ * messages with), never from the rendered row: Discord's author name is styled markup with
+ * no stable hook of its own, and the header is omitted entirely for consecutive messages by
+ * the same person — precisely the case this is looking for — so rendered text would be both
+ * class-name-bound and wrong.
+ *
+ * Candidates are only the ✦ a user could hit right now: inside the same comfortable band
+ * `settledClick` insists on, and not behind our own docked panel. The panel is an overlay,
+ * so a ✦ underneath it is hidden by Kibitz rather than broken — excluding those here keeps
+ * this check from reporting the panel's own geometry as a covered button. The pair nearest
+ * the bottom wins: the two clicks are a second apart, and a virtualised list is likeliest
+ * to keep the rows it just rendered.
+ */
+async function sameAuthorPair(ctx: ProbeContext): Promise<SameAuthorPair> {
+  const ids = await ctx.page.evaluate(
+    (hostAttr: string, panelHostAttr: string) => {
+      const panel = document.querySelector(`[${panelHostAttr}]`);
+      // A closed panel is `display: none`, whose rect is all zeros and overlaps nothing.
+      const bar = panel === null ? null : panel.getBoundingClientRect();
+      const out: string[] = [];
+      for (const host of document.querySelectorAll(`[${hostAttr}]`)) {
+        const r = host.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) continue;
+        if (r.top < 80 || r.bottom > innerHeight - 120) continue;
+        if (bar !== null && r.right > bar.left && r.left < bar.right && r.bottom > bar.top && r.top < bar.bottom) continue;
+        const id = host.getAttribute(hostAttr);
+        if (id !== null && id !== "") out.push(id);
+      }
+      return out;
+    },
+    BUTTON_HOST_ATTR,
+    PANEL_HOST_ATTR,
+  );
+  if (ids.length < 2) {
+    throw new Error(
+      `no two messages by one author on screen — only ${ids.length} ✦ ${ids.length === 1 ? "is" : "are"} clickable in the viewport right now`,
+    );
+  }
+
+  const bulk: ReadMessagesResult = await ctx.page.evaluate(
+    (channelId: string, messageIds: string[]) => {
+      const h = window.__kibitzProbe;
+      if (!h) throw new Error("probe helper missing");
+      return h.rpc.call("readMessages", { channelId, messageIds });
+    },
+    ctx.channelId,
+    ids,
+  );
+  if (bulk.messages.length === 0) {
+    throw new Error(
+      `the bridge read none of the ${ids.length} messages on screen (missing ${bulk.missing.slice(0, 5).join(", ")}), so no author is known`,
+    );
+  }
+
+  const byId = new Map(bulk.messages.map((message) => [message.id, message]));
+  const latestOf = new Map<string, UniversalMessage>();
+  let chosen: SameAuthorPair | null = null;
+  let textless: SameAuthorPair | null = null;
+  for (const id of ids) {
+    const message = byId.get(id);
+    if (message === undefined) continue;
+    const previous = latestOf.get(message.author.id);
+    if (previous !== undefined) {
+      const pair = { firstId: previous.id, secondId: id, authorName: message.author.name, candidates: ids.length };
+      textless = pair;
+      // A first message that carries text gives the "is it still there?" assertion something
+      // a human can read in the failure message; an attachment-only card would prove the
+      // same thing with an empty string, so it is only the fallback.
+      if (previous.content.trim() !== "") chosen = pair;
+    }
+    latestOf.set(message.author.id, message);
+  }
+  const pair = chosen ?? textless;
+  if (pair === null) {
+    const names = [...new Set(bulk.messages.map((message) => message.author.name))].slice(0, 6).join(", ");
+    throw new Error(
+      `no two messages by one author on screen — all ${bulk.messages.length} clickable messages have different authors (${names})`,
+    );
+  }
+  return pair;
+}
+
+/**
  * Frame-delivery counter installed in the page by `button-injected-without-frames`. It
  * lives on `window` like `__kibitzProbe` rather than on an attribute, so counting frames
  * never mutates the DOM the injector is being watched on.
@@ -447,88 +710,13 @@ export const CHECKS: ProbeCheck[] = [
     description: "the last button host is unobstructed in the viewport and accepts a real click",
     timeoutMs: 30_000,
     /**
-     * Clicking in a virtualised list is a race, and losing it looks exactly like a broken
-     * button. Measured on live Discord (2026-09-02): `scrollIntoView` then click put the
-     * pointer where the host *had* been — the list had re-rendered and the click landed on
-     * `<html>`, so the panel never opened and the run looked like a contract failure. A red
-     * probe files `auto:broken-selector` and sends the fix agent after a selector that never
-     * broke, so the click waits until the same coordinates hold still across two samples and
-     * still hit-test to our host, and it clicks the coordinates rather than a stale handle.
-     *
-     * Two further measured causes of a covered target, both transient, both retried with the
-     * pointer parked in a corner first: Discord puts a transparent full-viewport `fixed` div
-     * behind an open context menu to catch the dismissing click, and hovering a message
-     * raises its action toolbar. The covering element is described in full (tag, role,
-     * aria-label, data-*, rect) because that string is the evidence the fix agent reads —
-     * `div#` with an empty id, which is every Discord element, tells nobody anything.
+     * The click itself, and every measured way a virtualised list can make it miss, lives in
+     * `settledClick` — this check is the assertion that a real click on the last ✦ lands.
      */
     async run(ctx) {
-      const { page } = ctx;
-      // No named inner functions inside a page callback: tsx compiles them with esbuild's
-      // `__name` helper, which does not exist in the page — the call fails with
-      // "ReferenceError: __name is not defined" and reads like a broken button.
-      const spot = (): Promise<ButtonSpot> =>
-        page.evaluate((hostAttr: string) => {
-          const hosts = document.querySelectorAll(`[${hostAttr}]`);
-          const host = hosts[hosts.length - 1];
-          if (!host) return { error: "no button host in DOM" };
-          // A host near the top bar or behind the message box cannot be clicked reliably.
-          const initial = host.getBoundingClientRect();
-          if (initial.top < 80 || initial.bottom > innerHeight - 120) host.scrollIntoView({ block: "center" });
-          const r = host.getBoundingClientRect();
-          const x = Math.round(r.left + r.width / 2);
-          const y = Math.round(r.top + r.height / 2);
-          const hit = document.elementFromPoint(x, y);
-          if (!hit || !(hit === host || host.contains(hit))) {
-            if (!hit) return { error: `nothing hit-tests at the button host (${x},${y})` };
-            const hr = hit.getBoundingClientRect();
-            const data = Array.from(hit.attributes)
-              .filter((a) => a.name.startsWith("data-") || a.name === "role" || a.name === "aria-label")
-              .map((a) => `${a.name}=${a.value.slice(0, 32)}`)
-              .join(" ");
-            const fullViewport = Math.round(hr.width) >= innerWidth && Math.round(hr.height) >= innerHeight;
-            return {
-              error:
-                `button host at (${x},${y}) size ${Math.round(r.width)}x${Math.round(r.height)} is covered by ` +
-                `<${hit.tagName.toLowerCase()}${data ? ` ${data}` : ""}> at ` +
-                `${Math.round(hr.left)},${Math.round(hr.top)} ${Math.round(hr.width)}x${Math.round(hr.height)}` +
-                `${fullViewport ? " — a full-viewport layer (open context menu or modal backdrop)" : ""}` +
-                ` [position:${getComputedStyle(hit).position} pointer-events:${getComputedStyle(hit).pointerEvents}]`,
-            };
-          }
-          return { x, y, messageId: host.getAttribute(hostAttr) ?? "" };
-        }, BUTTON_HOST_ATTR);
-
-      let last = "never sampled";
-      for (let attempt = 0; attempt < 12; attempt++) {
-        // Park the pointer away from the list first: a hover toolbar or a popout that a
-        // previous attempt's own mouse move opened would otherwise cover the target for
-        // every remaining attempt.
-        if (attempt > 0) {
-          await page.mouse.move(4, 4);
-          await setTimeout(POLL_INTERVAL_MS);
-        }
-        const first = await spot();
-        await setTimeout(POLL_INTERVAL_MS);
-        const second = await spot();
-        if ("error" in first) {
-          last = first.error;
-          continue;
-        }
-        if ("error" in second) {
-          last = second.error;
-          continue;
-        }
-        if (first.x !== second.x || first.y !== second.y) {
-          last = `still moving: (${first.x},${first.y}) → (${second.x},${second.y})`;
-          continue;
-        }
-        if (!second.messageId) throw new Error(`button host has an empty ${BUTTON_HOST_ATTR}`);
-        await page.mouse.click(second.x, second.y);
-        ctx.clickedMessageId = second.messageId;
-        return `clicked button of ${second.messageId} at (${second.x},${second.y}) after ${attempt + 1} settle attempt(s)`;
-      }
-      throw new Error(`no button host held still long enough to click: ${last}`);
+      const clicked = await settledClick(ctx.page, null);
+      ctx.clickedMessageId = clicked.messageId;
+      return `clicked button of ${clicked.messageId} at (${clicked.x},${clicked.y}) after ${clicked.attempts} settle attempt(s)`;
     },
   },
   {
@@ -537,30 +725,7 @@ export const CHECKS: ProbeCheck[] = [
     timeoutMs: 20_000,
     async run({ page, clickedMessageId }) {
       if (!clickedMessageId) throw new Error("button-clickable left no message id");
-      const observe = () =>
-        page.evaluate(
-          (hostAttr: string, stateAttr: string, msgAttr: string, errAttr: string) => {
-            const host = document.querySelector(`[${hostAttr}]`);
-            return host
-              ? { state: host.getAttribute(stateAttr), messageId: host.getAttribute(msgAttr), error: host.getAttribute(errAttr) }
-              : null;
-          },
-          PANEL_HOST_ATTR,
-          PANEL_STATE_ATTR,
-          PANEL_MESSAGE_ATTR,
-          PANEL_ERROR_ATTR,
-        );
-      const ready = await until(
-        `[${PANEL_HOST_ATTR}] ${PANEL_STATE_ATTR}=ready for ${clickedMessageId}`,
-        15_000,
-        async () => {
-          const s = await observe();
-          if (!s) return null;
-          if (s.state === "error") throw new Error(`panel state error: ${s.error ?? "(no detail)"}`);
-          return s.state === "ready" && s.messageId === clickedMessageId ? s : null;
-        },
-        async () => JSON.stringify(await observe()),
-      );
+      const ready = await panelReadyFor(page, clickedMessageId, 15_000);
       return `panel ready for ${ready.messageId}`;
     },
   },
@@ -758,6 +923,77 @@ export const CHECKS: ProbeCheck[] = [
           })
           .catch(() => undefined);
       }
+    },
+  },
+  {
+    id: "same-author-continues",
+    description: "a second message by the same author appends to the open conversation instead of restarting the panel",
+    timeoutMs: 60_000,
+    /**
+     * What a user does when one person says two things worth asking about: click the ✦ on
+     * the first, then the ✦ on the next. Restarting the panel there would throw away the
+     * answer they had just read and re-ask the model everything it already knew, so the
+     * second card joins the open transcript and the anchor moves to it.
+     *
+     * Everything asserted is a product of the READ, not of the model, so the check proves
+     * the behaviour on a run with no API key configured — which every live probe run is:
+     * the cards, the anchor attribute and the surviving text all exist with
+     * `configured: false`. A configured key only adds answer turns AROUND the cards
+     * (`section.card` is a message card and never an answer), so the same three assertions
+     * hold unchanged, mid-stream included.
+     *
+     * The premise — two messages by one author, both with a clickable ✦ — is verified, and
+     * its absence FAILS instead of passing quietly the way `button-under-toolbar` may when
+     * no hover toolbar exists. That check can still conclude the button works; this one
+     * would have observed nothing at all about continuation, and a green line that proved
+     * nothing about the behaviour it names is worse than a red one.
+     */
+    async run(ctx) {
+      const { page } = ctx;
+      await ensureHelper(ctx);
+      const pair = await sameAuthorPair(ctx);
+
+      const opening = await settledClick(page, pair.firstId);
+      await panelReadyFor(page, pair.firstId, 15_000);
+      const before = await panelTranscript(page);
+      if (before.cards.length === 0) {
+        throw new Error(`the panel is ready for ${pair.firstId} but shows no message card, so a second click has nothing to append to`);
+      }
+
+      const second = await settledClick(page, pair.secondId);
+      // The anchor moving is the one signal both outcomes share, so waiting for it cannot
+      // hide either: a restart moves it at once and then rebuilds the transcript, a
+      // continuation moves it when the read lands. Whichever happened, the panel has
+      // settled by the time the assertions below look at it.
+      await panelReadyFor(page, pair.secondId, 15_000);
+      const after = await panelTranscript(page);
+
+      if (after.cards.length !== before.cards.length + 1) {
+        throw new Error(
+          `clicking a second message by ${pair.authorName} left ${after.cards.length} message card(s) where the open conversation had ${before.cards.length} — the panel restarted instead of appending (transcript now ${JSON.stringify(after.text.slice(0, 160))})`,
+        );
+      }
+      const dropped = before.cards.findIndex((text, index) => after.cards[index] !== text);
+      if (dropped !== -1) {
+        throw new Error(
+          `message card ${dropped + 1} of the open conversation was rewritten when the second message arrived: it read ${JSON.stringify(before.cards[dropped] ?? "")} and now reads ${JSON.stringify(after.cards[dropped] ?? "(gone)")}`,
+        );
+      }
+      const witness = before.cards[0] ?? "";
+      if (witness !== "" && !after.text.includes(witness)) {
+        throw new Error(
+          `the first exchange is gone from the transcript after the second click: ${JSON.stringify(witness.slice(0, 80))} is no longer anywhere in ${JSON.stringify(after.text.slice(0, 160))}`,
+        );
+      }
+      const anchor = await panelAttr(page, PANEL_MESSAGE_ATTR);
+      if (anchor !== pair.secondId) {
+        throw new Error(`${PANEL_MESSAGE_ATTR} is ${JSON.stringify(anchor)} after clicking ${pair.secondId}, so the panel is not anchored to the message it was last asked about`);
+      }
+      return (
+        `${pair.authorName}'s ${pair.firstId} then ${pair.secondId} (of ${pair.candidates} ✦ on screen, ${opening.attempts}+${second.attempts} settle attempt(s)): ` +
+        `cards ${before.cards.length} → ${after.cards.length}, anchor moved to ${anchor}` +
+        `${witness === "" ? "" : `, first card still reads ${JSON.stringify(witness.slice(0, 40))}`}`
+      );
     },
   },
 ];
