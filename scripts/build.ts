@@ -35,12 +35,20 @@ const ENTRIES: Record<string, string> = {
 /**
  * The desktop bundle runs where `chrome` is undefined; one stray import of shared/ext.ts
  * would throw at load and take the whole injection down silently. Fail the build instead.
+ *
+ * The check is for the BARE identifier: `export const ext = chrome` bundles as
+ * `var ext = chrome;` and every call site then reads `ext.runtime…`, so a pattern that
+ * expects `chrome.<member>` would miss the exact failure it exists for. The lookbehind
+ * excludes `.chrome` (a property) and identifier tails like `isChrome`.
  */
-const CHROME_API = /\bchrome\.(runtime|storage|permissions|action|tabs)\b/;
+const BARE_CHROME = /(?<![.\w$])chrome\b/;
 async function assertDesktopBundleIsChromeFree(): Promise<void> {
   const text = await fs.readFile(path.join(outDir, "desktop-renderer.js"), "utf8");
-  const hit = CHROME_API.exec(text);
-  if (hit) throw new Error(`dist/desktop-renderer.js references ${hit[0]}: the desktop bundle must not touch the extension API`);
+  const hit = BARE_CHROME.exec(text);
+  if (hit) {
+    const line = text.slice(0, hit.index).split("\n").length;
+    throw new Error(`dist/desktop-renderer.js:${line} references the \`chrome\` global: the desktop bundle must not touch the extension API`);
+  }
 }
 
 const STATIC_FILES: Record<string, string> = {
