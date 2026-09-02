@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { loadDraft, loadUiState, saveDraft, saveUiState } from "../../src/background/settings-service";
-import type { Settings } from "../../src/core/settings";
+import { AUTO_LANGUAGE, type Settings } from "../../src/core/settings";
 
 // A stand-in for chrome.storage.local + chrome.permissions, installed before shared/ext.ts
 // evaluates `chrome` at import time (hence vi.hoisted). The store is the assertion target:
@@ -32,6 +32,7 @@ const STORED: Settings = {
   apiKey: "sk-stored",
   model: "gpt-4o-mini",
   sendImages: true,
+  language: AUTO_LANGUAGE,
 };
 
 const stored = (): Settings | undefined => fakeChrome.store.settings as Settings | undefined;
@@ -51,6 +52,7 @@ describe("loadDraft", () => {
       model: "gpt-4o-mini",
       hasKey: true,
       sendImages: true,
+      language: AUTO_LANGUAGE,
     });
     expect(JSON.stringify(draft)).not.toContain("sk-stored");
   });
@@ -67,6 +69,15 @@ describe("loadDraft", () => {
     fakeChrome.store.settings = { ...STORED, sendImages: false };
     const draft = await loadDraft();
     expect(draft).toMatchObject({ sendImages: false, hasKey: true });
+    expect(JSON.stringify(draft)).not.toContain("sk-stored");
+  });
+
+  // The picker is seeded from this draft, so a stored label that never comes back would show
+  // "Auto" over a Turkish configuration — and the next save would then write "auto" over it.
+  it("reports a stored language to the panel without ever reporting the key", async () => {
+    fakeChrome.store.settings = { ...STORED, language: "Türkçe" };
+    const draft = await loadDraft();
+    expect(draft).toMatchObject({ language: "Türkçe", hasKey: true });
     expect(JSON.stringify(draft)).not.toContain("sk-stored");
   });
 });
@@ -102,6 +113,29 @@ describe("saveDraft", () => {
     fakeChrome.granted = ["https://api.openai.com/*"];
     await saveDraft({ provider: "openai-compatible", baseUrl: STORED.baseUrl, model: STORED.model, apiKey: "" });
     expect(stored()?.sendImages).toBe(false);
+  });
+
+  it("persists a language the user picked", async () => {
+    fakeChrome.store.settings = STORED;
+    fakeChrome.granted = ["https://api.openai.com/*"];
+    const result = await saveDraft({
+      provider: "openai-compatible",
+      baseUrl: STORED.baseUrl,
+      model: STORED.model,
+      apiKey: "",
+      language: "Türkçe",
+    });
+    expect(result).toEqual({ ok: true });
+    expect(stored()).toEqual({ ...STORED, language: "Türkçe" });
+  });
+
+  // A panel loaded before the picker shipped says nothing about the language; treating that
+  // silence as "auto" would undo a choice made in the options page or by `desktop -- setup`.
+  it("keeps a stored language when a save omits the field, instead of resetting it to auto", async () => {
+    fakeChrome.store.settings = { ...STORED, language: "Türkçe" };
+    fakeChrome.granted = ["https://api.openai.com/*"];
+    await saveDraft({ provider: "openai-compatible", baseUrl: STORED.baseUrl, model: "gpt-5", apiKey: "" });
+    expect(stored()).toEqual({ ...STORED, model: "gpt-5", language: "Türkçe" });
   });
 
   it("refuses and stores nothing when no key is typed and none is stored", async () => {
@@ -144,6 +178,7 @@ describe("saveDraft", () => {
       apiKey: "sk-new",
       model: "claude",
       sendImages: true,
+      language: AUTO_LANGUAGE,
     });
   });
 });

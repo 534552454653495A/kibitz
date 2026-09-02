@@ -11,7 +11,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { attachChatPort } from "../../src/background/chat-session";
 import type { ChatMessage, PortResponse } from "../../src/core/messaging";
-import type { Settings } from "../../src/core/settings";
+import { AUTO_LANGUAGE, type Settings } from "../../src/core/settings";
 
 const fakeChrome = vi.hoisted(() => {
   const state = { store: {} as Record<string, unknown>, granted: [] as string[] };
@@ -52,6 +52,7 @@ const SETTINGS: Settings = {
   apiKey: "sk-stored",
   model: "m",
   sendImages: true,
+  language: AUTO_LANGUAGE,
 };
 
 const WITH_IMAGE: ChatMessage[] = [
@@ -129,6 +130,32 @@ describe("attachChatPort image policy", () => {
     const h = harness();
     h.send({ type: "chat", requestId: "r3", messages: WITH_IMAGE });
     await h.terminal("r3");
+    expect(stub.received[0]).toEqual(WITH_IMAGE);
+  });
+});
+
+// Same failure mode as the image policy above, one field over: the panel builds the messages
+// and never sees `Settings`, so if the service worker did not fold the language into the
+// outgoing conversation, choosing "Türkçe" would change nothing the model ever sees.
+describe("attachChatPort answer-language policy", () => {
+  it("hands the provider a system message that names the configured language", async () => {
+    fakeChrome.store.settings = { ...SETTINGS, language: "Türkçe" };
+    const h = harness();
+    h.send({ type: "chat", requestId: "r4", messages: WITH_IMAGE });
+    await h.terminal("r4");
+    const sent = stub.received[0] ?? [];
+    expect(sent[0]?.role).toBe("system");
+    expect(sent[0]?.content).toContain("Türkçe");
+    // Appended, not substituted: the prompt's own rules must still reach the model, and
+    // nothing outside the system message may change.
+    expect(sent[0]?.content.startsWith("rules")).toBe(true);
+    expect(sent.slice(1)).toEqual(WITH_IMAGE.slice(1));
+  });
+
+  it("hands the provider the conversation untouched when the language is auto", async () => {
+    const h = harness();
+    h.send({ type: "chat", requestId: "r5", messages: WITH_IMAGE });
+    await h.terminal("r5");
     expect(stub.received[0]).toEqual(WITH_IMAGE);
   });
 });

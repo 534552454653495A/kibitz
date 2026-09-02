@@ -151,7 +151,14 @@ describe("extension shell one-shot requests", () => {
     await expect(createExtensionShell().loadSettings()).resolves.toBeNull();
 
     fakeRuntime.reply["load-settings"] = {
-      draft: { provider: "anthropic", baseUrl: "https://api.anthropic.com", model: "m", hasKey: true, sendImages: false },
+      draft: {
+        provider: "anthropic",
+        baseUrl: "https://api.anthropic.com",
+        model: "m",
+        hasKey: true,
+        sendImages: false,
+        language: "Türkçe",
+      },
     };
     await expect(createExtensionShell().loadSettings()).resolves.toEqual({
       provider: "anthropic",
@@ -159,6 +166,7 @@ describe("extension shell one-shot requests", () => {
       model: "m",
       hasKey: true,
       sendImages: false,
+      language: "Türkçe",
     });
   });
 
@@ -186,6 +194,22 @@ describe("extension shell one-shot requests", () => {
     await expect(createExtensionShell().loadSettings()).rejects.toThrow(/malformed settings draft/);
   });
 
+  // Same story for the answer language: a host that predates the picker answers without it,
+  // and "auto" is what an unset language means, so the form opens on Auto instead of dying.
+  it("accepts a draft with no language and resolves it as auto rather than rejecting it", async () => {
+    fakeRuntime.reply["load-settings"] = {
+      draft: { provider: "anthropic", baseUrl: "https://api.anthropic.com", model: "m", hasKey: true },
+    };
+    await expect(createExtensionShell().loadSettings()).resolves.toMatchObject({ language: "auto" });
+  });
+
+  it("rejects a draft whose language is not a string instead of coercing it into a prompt", async () => {
+    fakeRuntime.reply["load-settings"] = {
+      draft: { provider: "anthropic", baseUrl: "https://api.anthropic.com", model: "m", hasKey: true, language: 42 },
+    };
+    await expect(createExtensionShell().loadSettings()).rejects.toThrow(/malformed settings draft/);
+  });
+
   it("throws when the worker died mid-request and sendMessage resolved with nothing", async () => {
     fakeRuntime.reply["load-settings"] = undefined;
     await expect(createExtensionShell().loadSettings()).rejects.toThrow(/no reply to load-settings/);
@@ -203,6 +227,7 @@ describe("extension shell one-shot requests", () => {
       model: "gpt",
       apiKey: "sk-1",
       sendImages: true,
+      language: "auto",
     };
     await expect(createExtensionShell().saveSettings(input)).resolves.toEqual({
       ok: false,
@@ -215,7 +240,14 @@ describe("extension shell one-shot requests", () => {
   it("throws when a save reply is neither ok:true nor an error message", async () => {
     fakeRuntime.reply["save-settings"] = { ok: false };
     await expect(
-      createExtensionShell().saveSettings({ provider: "anthropic", baseUrl: "https://a.test", model: "m", apiKey: "", sendImages: true }),
+      createExtensionShell().saveSettings({
+        provider: "anthropic",
+        baseUrl: "https://a.test",
+        model: "m",
+        apiKey: "",
+        sendImages: true,
+        language: "auto",
+      }),
     ).rejects.toThrow(/malformed save result/);
   });
 

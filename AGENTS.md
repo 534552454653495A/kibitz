@@ -233,6 +233,8 @@ Known canonical homes:
 | Logging | `log` from `src/shared/log.ts` (prefix is what the probe filters on) |
 | Settings schema / validation | `parseSettings`, `PROVIDER_PRESETS`, `originPattern` (`src/core/settings.ts`) |
 | Panel draft + stored key → settings | `mergeSettingsInput` (`src/core/settings.ts`) — pure, Node-safe; used by `src/background/settings-service.ts` and `desktop/request-handler.ts` |
+| Settings → outgoing messages | `applyImagePolicy`, `applyLanguagePolicy` (`src/core/settings.ts`) — both called side by side in `src/background/chat-session.ts` and `desktop/request-handler.ts`, the last point before the request leaves |
+| Answer-language values | `AUTO_LANGUAGE`, `LANGUAGE_PRESETS`, `normalizeLanguage` (`src/core/settings.ts`) — the panel, the options page and `desktop -- setup` all read this one list |
 | Settings persistence | extension: `src/shared/settings.ts` (chrome.storage); desktop: `desktop/settings-store.ts` (settings.json) |
 | LLM providers + error → ChatErrorCode | `createProvider` (`src/background/providers/index.ts`), `classifyError` (`providers/errors.ts`) — Node-safe, shared with the companion |
 | Prompt text | `.md` files in `src/core/prompts/`, rendered by `src/core/prompt.ts` |

@@ -10,7 +10,7 @@
  * `host` is only there so the thrown message names who misbehaved; a panel that shows
  * "companion returned a malformed settings draft" tells the user which half to restart.
  */
-import { PROVIDER_IDS, type ProviderId } from "../core/settings";
+import { AUTO_LANGUAGE, PROVIDER_IDS, type ProviderId } from "../core/settings";
 import { isRecord } from "../core/validate";
 import type { SaveSettingsResult, SettingsDraft } from "./types";
 
@@ -30,13 +30,16 @@ export function readDraft(reply: Record<string, unknown>, host: string): Setting
   // still get a usable form instead of "malformed draft". Absent reads as on, matching
   // `parseSettings`. A present non-boolean is a protocol bug and fails with the rest.
   const sendImages: unknown = isRecord(draft) ? draft.sendImages : undefined;
+  // Same tolerance for the language picker, same reason: an older host answers without it.
+  const language: unknown = isRecord(draft) ? draft.language : undefined;
   if (
     !isRecord(draft) ||
     provider === null ||
     typeof draft.baseUrl !== "string" ||
     typeof draft.model !== "string" ||
     typeof draft.hasKey !== "boolean" ||
-    (sendImages !== undefined && typeof sendImages !== "boolean")
+    (sendImages !== undefined && typeof sendImages !== "boolean") ||
+    (language !== undefined && typeof language !== "string")
   ) {
     throw new Error(`${host} returned a malformed settings draft`);
   }
@@ -46,6 +49,7 @@ export function readDraft(reply: Record<string, unknown>, host: string): Setting
     model: draft.model,
     hasKey: draft.hasKey,
     sendImages: sendImages ?? true,
+    language: language ?? AUTO_LANGUAGE,
   };
 }
 

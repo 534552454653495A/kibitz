@@ -116,6 +116,17 @@ function panelAttr(page: Page, attr: string): Promise<string | null> {
   );
 }
 
+/**
+ * Frame-delivery counter installed in the page by `button-injected-without-frames`. It
+ * lives on `window` like `__kibitzProbe` rather than on an attribute, so counting frames
+ * never mutates the DOM the injector is being watched on.
+ */
+interface FrameTicker {
+  ticks: number;
+  stop: boolean;
+}
+type FrameTickerWindow = Window & { __kibitzProbeFrames?: FrameTicker };
+
 const MIN_CREATED_AT = Date.parse("2015-01-01T00:00:00Z");
 
 export const CHECKS: ProbeCheck[] = [
@@ -643,6 +654,110 @@ export const CHECKS: ProbeCheck[] = [
         throw new Error(`scan collected ${done.count ?? "?"} messages but ${initial} were already rendered — no older history was loaded`);
       }
       return `collected ${count} messages (${initial} were rendered before the scan)`;
+    },
+  },
+  {
+    id: "button-injected-without-frames",
+    description: "buttons are still injected into the rendered list while the page is delivered no animation frames",
+    timeoutMs: 40_000,
+    /**
+     * The 2026-09-02 failure reproduced end to end: with the window in the background
+     * Chrome delivers no animation frames, so an injector that coalesces its scans onto
+     * requestAnimationFrame arms a callback that is never run and its "already scheduled"
+     * guard latches for good — measured live, 33 rendered items with 0 buttons for 100s,
+     * which only appeared once the window came to the foreground.
+     *
+     * Frames are stopped by BACKGROUNDING the tab (a second tab is brought to the front),
+     * not by overwriting requestAnimationFrame in the page: content.js runs in the
+     * extension's isolated world, whose globals a page-world override cannot reach, so an
+     * override would silently prove nothing in the shell the probe runs by default.
+     * Starving the renderer is world-agnostic — and it is what actually happened.
+     *
+     * The starvation is measured, never assumed: a rAF loop counts frames, and if the count
+     * keeps rising (a browser that renders background tabs anyway) the check returns a pass
+     * saying it concluded nothing, the way `button-under-toolbar` does when no toolbar
+     * exists. A check whose premise quietly fails is worse than no check at all.
+     *
+     * The mutation used is the removal of our own hosts, which is also the re-render case
+     * the injector already handles: nothing of Discord's is touched, and the buttons the
+     * earlier checks needed are back by the time this one returns.
+     */
+    async run({ page }) {
+      const state = () =>
+        page.evaluate(
+          (itemSel: string, hostAttr: string) => ({
+            items: document.querySelectorAll(itemSel).length,
+            hosts: document.querySelectorAll(`[${hostAttr}]`).length,
+            frames: (window as FrameTickerWindow).__kibitzProbeFrames?.ticks ?? 0,
+            hidden: document.visibilityState === "hidden",
+          }),
+          MESSAGE_ITEM,
+          BUTTON_HOST_ATTR,
+        );
+
+      const start = await state();
+      if (start.items === 0) return "no message items were rendered (nothing to conclude)";
+      if (start.hosts === 0) throw new Error(`no [${BUTTON_HOST_ATTR}] host to take away and wait for: ${JSON.stringify(start)}`);
+
+      // Source text, not a function: puppeteer serialises a function's *transpiled* body, and
+      // tsx's keepNames rewrites a named inner function into a call to its `__name` helper —
+      // which does not exist in the page ("__name is not defined", measured while writing
+      // this). A self-rescheduling rAF loop needs that name, so it travels as a string, the
+      // way `ensureHelper` ships the page helper.
+      await page.evaluate(`(() => {
+        const counter = { ticks: 0, stop: false };
+        window.__kibitzProbeFrames = counter;
+        const tick = () => {
+          if (counter.stop) return;
+          counter.ticks++;
+          requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      })();`);
+
+      const decoy = await page.browser().newPage();
+      try {
+        await decoy.bringToFront();
+        await setTimeout(POLL_INTERVAL_MS * 2);
+        const settled = await state();
+        await setTimeout(POLL_INTERVAL_MS * 2);
+        const starved = await state();
+        if (!starved.hidden || starved.frames !== settled.frames) {
+          return `this browser kept the backgrounded tab rendering (hidden=${starved.hidden}, ${starved.frames - settled.frames} frames in ${POLL_INTERVAL_MS * 2}ms) — frame starvation is not reproducible here (nothing to conclude)`;
+        }
+
+        const removed = await page.evaluate((hostAttr: string) => {
+          const hosts = Array.from(document.querySelectorAll(`[${hostAttr}]`));
+          for (const host of hosts) host.remove();
+          return hosts.length;
+        }, BUTTON_HOST_ATTR);
+        const framesAtRemoval = (await state()).frames;
+
+        const back = await until(
+          `${Math.min(3, removed)} of the ${removed} removed [${BUTTON_HOST_ATTR}] hosts re-injected while no frame is delivered`,
+          20_000,
+          async () => {
+            const s = await state();
+            return s.hosts >= Math.min(3, removed) ? s : null;
+          },
+          async () => JSON.stringify(await state()),
+        );
+        if (back.frames !== framesAtRemoval) {
+          return `frames resumed mid-check (${back.frames - framesAtRemoval} delivered), so the ${back.hosts} re-injected buttons prove nothing about starvation (nothing to conclude)`;
+        }
+        return `${removed} buttons removed while hidden, ${back.hosts} re-injected for ${back.items} items with 0 frames delivered`;
+      } finally {
+        // Errors are dropped rather than raised: a cleanup failure must not replace the
+        // check's own verdict, and the run is over either way.
+        await page.bringToFront().catch(() => undefined);
+        await decoy.close().catch(() => undefined);
+        await page
+          .evaluate(() => {
+            const counter = (window as FrameTickerWindow).__kibitzProbeFrames;
+            if (counter) counter.stop = true;
+          })
+          .catch(() => undefined);
+      }
     },
   },
 ];

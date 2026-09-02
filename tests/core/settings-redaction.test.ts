@@ -12,6 +12,7 @@ describe("redactSettings", () => {
     apiKey: "sk-proj-SHOULD-NEVER-APPEAR",
     model: "gpt-4o-mini",
     sendImages: false,
+    language: "Türkçe",
   };
 
   it("keeps no trace of the key in any serialisation of the result", () => {
@@ -32,6 +33,7 @@ describe("redactSettings", () => {
       baseUrl: "https://api.openai.com/v1",
       model: "gpt-4o-mini",
       sendImages: false,
+      language: "Türkçe",
       apiKeyLength: settings.apiKey.length,
     });
   });

@@ -106,6 +106,7 @@ page, no extension options screen (that still exists as a fallback).
 | **API key** | Stored locally only; the field shows `••••` and never displays a stored key again. Leave it empty when editing other fields. For Ollama any non-empty string works. |
 | **Model** | e.g. `gpt-4o-mini`, `claude-sonnet-4-5`, `llama3.1` |
 | **Send images to the model** | On by default. Sends image attachments to your provider so it can describe them; needs a vision-capable model. See [Images](#images) below. |
+| **Answer language** | `Auto` answers in whatever language the message is written in (the default, and what every configuration made before this field does). Pick a language — or type your own label, e.g. `Türkçe, samimi ton` — and every answer comes back in it regardless of the message's language. |
 
 **Save** persists immediately. In the extension, Chrome must then approve the one origin you
 typed (Kibitz ships with zero host access): the panel shows **Grant access**, which opens a

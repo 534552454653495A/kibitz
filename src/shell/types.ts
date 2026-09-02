@@ -40,6 +40,8 @@ export interface SettingsDraft {
   hasKey: boolean;
   /** Whether image attachments may go to the provider; not a secret, so it round-trips. */
   sendImages: boolean;
+  /** Answer language, `"auto"` or a label the model reads; not a secret either. */
+  language: string;
 }
 
 export interface SettingsInput {
@@ -49,6 +51,7 @@ export interface SettingsInput {
   /** Empty string means "keep the stored key" so the user can edit a URL without retyping it. */
   apiKey: string;
   sendImages: boolean;
+  language: string;
 }
 
 export type SaveSettingsResult =

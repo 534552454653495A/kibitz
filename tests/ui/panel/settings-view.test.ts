@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { render } from "preact";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { PROVIDER_PRESETS } from "../../../src/core/settings";
+import { AUTO_LANGUAGE, LANGUAGE_PRESETS, PROVIDER_PRESETS } from "../../../src/core/settings";
 import { ACTION_ATTR } from "../../../src/shared/dom-markers";
 import type { SettingsDraft, ShellCapabilities } from "../../../src/shell/types";
 import type { PanelActions } from "../../../src/ui/panel/actions";
@@ -37,6 +37,7 @@ const DRAFT: SettingsDraft = {
   model: PROVIDER_PRESETS["openai-compatible"].model,
   hasKey: true,
   sendImages: true,
+  language: AUTO_LANGUAGE,
 };
 
 let container: HTMLElement;
@@ -76,6 +77,20 @@ const setValue = (el: HTMLInputElement | HTMLSelectElement, value: string, event
   el.value = value;
   el.dispatchEvent(new Event(event, { bubbles: true }));
 };
+
+/**
+ * The answer-language select is found by the option it must offer rather than by position,
+ * so adding another dropdown to the form does not silently retarget these tests.
+ */
+const languageSelect = (): HTMLSelectElement => {
+  const el = [...container.querySelectorAll("select")].find(
+    (candidate) => candidate.querySelector(`option[value="${AUTO_LANGUAGE}"]`) !== null,
+  );
+  if (el === undefined) throw new Error("no answer-language select");
+  return el;
+};
+const customLanguage = (): HTMLInputElement | null =>
+  container.querySelector<HTMLInputElement>('input[aria-label="Custom answer language"]');
 
 beforeEach(() => {
   document.body.replaceChildren();
@@ -118,6 +133,7 @@ describe("settings view", () => {
       model: PROVIDER_PRESETS["openai-compatible"].model,
       apiKey: "",
       sendImages: true,
+      language: AUTO_LANGUAGE,
     });
   });
 
@@ -188,5 +204,68 @@ describe("settings view", () => {
   it("starts ticked when no draft has arrived, matching how an unset configuration parses", () => {
     show({ settings: { draft: null } });
     expect(field('input[type="checkbox"]').checked).toBe(true);
+  });
+
+  // The language is the only per-answer instruction the user can set from inside Discord, so
+  // the form has to show what is stored and hand exactly that back on save.
+  it("shows a stored preset language and submits it unchanged", () => {
+    show({ settings: { draft: { ...DRAFT, language: "Türkçe" } } });
+    expect(languageSelect().value).toBe("Türkçe");
+    expect(customLanguage()).toBeNull();
+
+    act("save-settings").click();
+
+    expect(actions.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ language: "Türkçe" }));
+  });
+
+  it("submits auto once the user picks Auto, so answers follow the message again", async () => {
+    show({ settings: { draft: { ...DRAFT, language: "Deutsch" } } });
+    setValue(languageSelect(), AUTO_LANGUAGE, "change");
+    await vi.waitFor(() => expect(languageSelect().value).toBe(AUTO_LANGUAGE));
+
+    act("save-settings").click();
+
+    expect(actions.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ language: AUTO_LANGUAGE }));
+  });
+
+  it("submits a language typed into the Other row after normalising it", async () => {
+    show();
+    setValue(languageSelect(), "__other__", "change");
+    await vi.waitFor(() => expect(customLanguage()).not.toBeNull());
+    const custom = customLanguage();
+    if (custom === null) throw new Error("no custom language input");
+    // Padding and doubled spaces are what a paste really produces; the saved label must not
+    // carry them into the prompt line.
+    setValue(custom, "  Türkçe,   samimi ton  ", "input");
+    await vi.waitFor(() => expect(customLanguage()?.value).toBe("  Türkçe,   samimi ton  "));
+
+    act("save-settings").click();
+
+    expect(actions.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ language: "Türkçe, samimi ton" }));
+  });
+
+  // The regression that matters: a label the dropdown cannot show must not be quietly reset
+  // to Auto by a save that was only meant to change the model.
+  it("keeps a stored custom language through a save that edits another field", async () => {
+    const custom = "Türkçe, samimi ton";
+    expect(LANGUAGE_PRESETS).not.toContain(custom);
+    show({ settings: { draft: { ...DRAFT, language: custom } } });
+    expect(customLanguage()?.value).toBe(custom);
+
+    setValue(field('input[type="text"]'), "gpt-9", "input");
+    await vi.waitFor(() => expect(field('input[type="text"]').value).toBe("gpt-9"));
+
+    act("save-settings").click();
+
+    expect(actions.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ model: "gpt-9", language: custom }));
+  });
+
+  it("submits auto when no draft has arrived, matching how an unset configuration parses", () => {
+    show({ settings: { draft: null } });
+    expect(languageSelect().value).toBe(AUTO_LANGUAGE);
+
+    act("save-settings").click();
+
+    expect(actions.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ language: AUTO_LANGUAGE }));
   });
 });

@@ -28,6 +28,7 @@ export async function loadDraft(): Promise<SettingsDraftMessage | null> {
     model: settings.model,
     hasKey: settings.apiKey.length > 0,
     sendImages: settings.sendImages,
+    language: settings.language,
   };
 }
 

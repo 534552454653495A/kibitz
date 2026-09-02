@@ -6,7 +6,7 @@
  * shells map a given failure to the same ChatErrorCode.
  */
 import type { ChatRequest, PortRequest, PortResponse } from "../core/messaging";
-import { applyImagePolicy, originPattern } from "../core/settings";
+import { applyImagePolicy, applyLanguagePolicy, originPattern } from "../core/settings";
 import { isRecord } from "../core/validate";
 import { ext } from "../shared/ext";
 import { log } from "../shared/log";
@@ -56,7 +56,7 @@ export function attachChatPort(port: chrome.runtime.Port): void {
         });
         return;
       }
-      const messages = applyImagePolicy(request.messages, settings);
+      const messages = applyLanguagePolicy(applyImagePolicy(request.messages, settings), settings);
       for await (const text of createProvider(settings).stream(messages, controller.signal)) {
         if (controller.signal.aborted) break;
         post({ type: "delta", requestId, text });

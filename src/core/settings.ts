@@ -21,6 +21,13 @@ export interface Settings {
    * who do not want Discord CDN links leaving for a third party.
    */
   sendImages: boolean;
+  /**
+   * The language answers come back in. `AUTO_LANGUAGE` keeps the model matching whatever
+   * the messages are written in; anything else is a label the model reads verbatim
+   * ("Türkçe", "English", "Türkçe, samimi ton"), because a language list can never cover
+   * every reader and the model already understands the request in prose.
+   */
+  language: string;
 }
 
 export interface ProviderPreset {
@@ -48,6 +55,44 @@ export const PROVIDER_PRESETS: Record<ProviderId, ProviderPreset> = {
 
 export const PROVIDER_IDS = Object.keys(PROVIDER_PRESETS) as ProviderId[];
 
+/** The one value that means "match the message", written once so no UI invents its own. */
+export const AUTO_LANGUAGE = "auto";
+
+/**
+ * Suggestions for the settings dropdowns, not a whitelist: `language` accepts any label, so
+ * a reader whose language is missing here types it and the model obliges. Kept in the core
+ * because the panel, the options page and `desktop -- setup` must offer the same list, and
+ * three hand-written lists would drift.
+ */
+export const LANGUAGE_PRESETS: readonly string[] = [
+  "Türkçe",
+  "English",
+  "Deutsch",
+  "Français",
+  "Español",
+  "Italiano",
+  "Português",
+  "Русский",
+  "العربية",
+  "日本語",
+  "中文",
+];
+
+/** Longer than any real answer-language instruction; a novel pasted here is a mistake, not a setting. */
+const LANGUAGE_MAX = 80;
+
+/**
+ * Normalises a language label to something safe to splice into a prompt line: whitespace
+ * (including the newlines a paste brings) collapses to single spaces, so the instruction
+ * cannot grow extra lines that read as extra rules, and the result is length-capped.
+ * An empty value is `AUTO_LANGUAGE`, which is also how a configuration written before this
+ * field existed parses — those users keep the behaviour they have today.
+ */
+export function normalizeLanguage(value: string): string {
+  const collapsed = value.replace(/\s+/g, " ").trim().slice(0, LANGUAGE_MAX).trim();
+  return collapsed.length === 0 ? AUTO_LANGUAGE : collapsed;
+}
+
 /** Null when the value is not a complete, usable configuration (missing key, unknown provider…). */
 export function parseSettings(value: unknown): Settings | null {
   if (typeof value !== "object" || value === null) return null;
@@ -60,12 +105,23 @@ export function parseSettings(value: unknown): Settings | null {
   // every existing user. A present non-boolean is corruption, not absence, so it fails.
   const sendImages: unknown = v.sendImages;
   if (sendImages !== undefined && typeof sendImages !== "boolean") return null;
+  // Same rule for the answer language: absence is every configuration that predates it, and
+  // `auto` is exactly the behaviour those users have been getting from the system prompt.
+  const language: unknown = v.language;
+  if (language !== undefined && typeof language !== "string") return null;
   try {
     originPattern(v.baseUrl);
   } catch {
     return null;
   }
-  return { provider: v.provider, baseUrl: v.baseUrl, apiKey: v.apiKey, model: v.model, sendImages: sendImages ?? true };
+  return {
+    provider: v.provider,
+    baseUrl: v.baseUrl,
+    apiKey: v.apiKey,
+    model: v.model,
+    sendImages: sendImages ?? true,
+    language: normalizeLanguage(language ?? AUTO_LANGUAGE),
+  };
 }
 
 /** A draft as the panel sends it, where an empty key means "keep the stored one". */
@@ -76,6 +132,8 @@ export interface SettingsDraftInput {
   apiKey: string;
   /** Absent when the sender predates the image toggle; `parseSettings` reads that as "on". */
   sendImages?: boolean;
+  /** Absent when the sender predates the language picker; that reads as `AUTO_LANGUAGE`. */
+  language?: string;
 }
 
 export type SettingsMerge = { ok: true; settings: Settings } | { ok: false; error: string };
@@ -102,8 +160,9 @@ export function mergeSettingsInput(input: SettingsDraftInput, stored: Settings |
   // (a renderer or panel from before the toggle) must not overwrite a choice the user made.
   // Only when nothing is stored either does `parseSettings`'s "absent means on" decide.
   const sendImages = input.sendImages ?? stored?.sendImages;
+  const language = input.language ?? stored?.language;
 
-  const settings = parseSettings({ provider: input.provider, baseUrl, model, apiKey, sendImages });
+  const settings = parseSettings({ provider: input.provider, baseUrl, model, apiKey, sendImages, language });
   if (settings !== null) return { ok: true, settings };
   if (input.provider !== "openai-compatible" && input.provider !== "anthropic") {
     return { ok: false, error: `Unknown provider "${input.provider}".` };
@@ -137,6 +196,8 @@ export interface RedactedSettings {
   model: string;
   /** Not a secret: a diagnostic that cannot see the image policy cannot explain a vision failure. */
   sendImages: boolean;
+  /** Not a secret either, and the first thing to check when answers come back in the wrong language. */
+  language: string;
   /** Length only: enough to tell "empty" from "pasted something" without revealing it. */
   apiKeyLength: number;
 }
@@ -147,6 +208,7 @@ export function redactSettings(settings: Settings): RedactedSettings {
     baseUrl: settings.baseUrl,
     model: settings.model,
     sendImages: settings.sendImages,
+    language: settings.language,
     apiKeyLength: settings.apiKey.length,
   };
 }
@@ -174,4 +236,29 @@ export function applyImagePolicy(messages: ChatMessage[], settings: Settings): C
     const { images: _dropped, ...rest } = message;
     return rest;
   });
+}
+
+/**
+ * The answer-language policy applied to an outgoing conversation: with a language configured,
+ * the system message carries an explicit instruction to answer in it.
+ *
+ * Same home and same reasoning as `applyImagePolicy` — the panel builds the messages and
+ * never sees `Settings`, both hosts re-read settings per request, so the last point before
+ * the bytes leave is the only unbypassable one. Called right beside it at both call sites.
+ *
+ * Appends rather than rewriting the prompt's own "answer in the language of the message"
+ * rule: matching that sentence by text would couple this function to the wording of
+ * `prompts/system.md`, and the rule that arrives last, naming the language, is the one the
+ * model follows. `AUTO_LANGUAGE` returns `messages` untouched, which is the whole point of
+ * the default — it is the behaviour the prompt already describes.
+ */
+export function applyLanguagePolicy(messages: ChatMessage[], settings: Settings): ChatMessage[] {
+  if (settings.language === AUTO_LANGUAGE) return messages;
+  const directive = `Always answer in ${settings.language}, whatever language the messages are written in. This overrides the rule about matching the language of the message being explained.`;
+  const index = messages.findIndex((message) => message.role === "system");
+  // No system message at all is not a shape this codebase produces, but a conversation
+  // replayed from somewhere else must still land in the right language rather than silently
+  // ignoring the setting.
+  if (index === -1) return [{ role: "system", content: directive }, ...messages];
+  return messages.map((message, at) => (at === index ? { ...message, content: `${message.content}\n${directive}` } : message));
 }

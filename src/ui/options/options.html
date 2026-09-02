@@ -51,6 +51,21 @@
           <label for="model">Model</label>
           <input id="model" type="text" spellcheck="false" placeholder="gpt-4o-mini" />
 
+          <label for="language">Answer language</label>
+          <select id="language"></select>
+          <input
+            id="language-other"
+            type="text"
+            spellcheck="false"
+            placeholder="Any language, e.g. Türkçe"
+            aria-label="Custom answer language"
+            hidden
+          />
+          <p class="hint">
+            Auto leaves the model matching whatever language the message is written in. Pick a
+            language, or choose “Other…” and type any label, to get every answer in it instead.
+          </p>
+
           <label class="check" for="send-images">
             <input id="send-images" type="checkbox" checked />
             <span>Send images to the model</span>

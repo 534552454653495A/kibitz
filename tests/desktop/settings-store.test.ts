@@ -11,6 +11,7 @@ const SETTINGS: Settings = {
   apiKey: "sk-1",
   model: "m",
   sendImages: true,
+  language: "Türkçe",
 };
 
 let dir: string;

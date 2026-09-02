@@ -14,7 +14,7 @@
 import { classifyError } from "../src/background/providers/errors";
 import { createProvider } from "../src/background/providers/index";
 import type { ChatRequest, SettingsInputMessage, SettingsStatus } from "../src/core/messaging";
-import { applyImagePolicy, mergeSettingsInput, type Settings } from "../src/core/settings";
+import { applyImagePolicy, applyLanguagePolicy, mergeSettingsInput, type Settings } from "../src/core/settings";
 import { isRecord } from "../src/core/validate";
 import { log } from "../src/shared/log";
 import type { DesktopDelivery, DesktopReply, DesktopRequest } from "../src/shell/desktop-protocol";
@@ -43,13 +43,15 @@ export const NO_SETTINGS_MESSAGE = "No API key configured. Run `npm run desktop 
 
 function parseInput(value: unknown): SettingsInputMessage | null {
   if (!isRecord(value)) return null;
-  const { provider, baseUrl, model, apiKey, sendImages } = value;
+  const { provider, baseUrl, model, apiKey, sendImages, language } = value;
   if (typeof provider !== "string" || typeof baseUrl !== "string" || typeof model !== "string" || typeof apiKey !== "string") {
     return null;
   }
   // A renderer that predates the image toggle sends no `sendImages`; `mergeSettingsInput`
   // reads that absence as "on" rather than silently turning the feature off on save.
-  return typeof sendImages === "boolean" ? { provider, baseUrl, model, apiKey, sendImages } : { provider, baseUrl, model, apiKey };
+  const base = { provider, baseUrl, model, apiKey };
+  const withImages = typeof sendImages === "boolean" ? { ...base, sendImages } : base;
+  return typeof language === "string" ? { ...withImages, language } : withImages;
 }
 
 function parseRequest(raw: unknown): DesktopRequest | null {
@@ -97,7 +99,7 @@ export function createDesktopRequestHandler(deps: RequestHandlerDeps): DesktopRe
         push({ type: "error", requestId, code: "no-settings", message: NO_SETTINGS_MESSAGE });
         return;
       }
-      const messages = applyImagePolicy(request.messages, settings);
+      const messages = applyLanguagePolicy(applyImagePolicy(request.messages, settings), settings);
       for await (const text of createProvider(settings).stream(messages, controller.signal)) {
         if (controller.signal.aborted) break;
         push({ type: "delta", requestId, text });
@@ -145,6 +147,7 @@ export function createDesktopRequestHandler(deps: RequestHandlerDeps): DesktopRe
                   model: settings.model,
                   hasKey: settings.apiKey.length > 0,
                   sendImages: settings.sendImages,
+                  language: settings.language,
                 },
         };
       }

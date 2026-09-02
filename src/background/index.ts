@@ -32,13 +32,17 @@ const GRANT_WINDOW = { width: 460, height: 340 } as const;
 
 function parseInput(value: unknown): SettingsInputMessage | null {
   if (!isRecord(value)) return null;
-  const { provider, baseUrl, model, apiKey, sendImages } = value;
+  const { provider, baseUrl, model, apiKey, sendImages, language } = value;
   if (typeof provider !== "string" || typeof baseUrl !== "string" || typeof model !== "string" || typeof apiKey !== "string") {
     return null;
   }
   // A panel from before the image toggle sends no `sendImages`; `mergeSettingsInput` reads
   // that absence as "on" instead of turning the feature off behind the user's back.
-  return typeof sendImages === "boolean" ? { provider, baseUrl, model, apiKey, sendImages } : { provider, baseUrl, model, apiKey };
+  const base = { provider, baseUrl, model, apiKey };
+  const withImages = typeof sendImages === "boolean" ? { ...base, sendImages } : base;
+  // Same shape of tolerance for the language picker: a panel that predates it says nothing,
+  // and `mergeSettingsInput` keeps whatever is stored instead of resetting it to auto.
+  return typeof language === "string" ? { ...withImages, language } : withImages;
 }
 
 function parseRequest(message: unknown): RuntimeRequest | null {

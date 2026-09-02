@@ -15,7 +15,16 @@
 import { CHAT_PORT_NAME, type PortResponse } from "../../core/messaging";
 import { ext } from "../../shared/ext";
 import { log } from "../../shared/log";
-import { originPattern, PROVIDER_IDS, PROVIDER_PRESETS, type ProviderId, type Settings } from "../../core/settings";
+import {
+  AUTO_LANGUAGE,
+  LANGUAGE_PRESETS,
+  normalizeLanguage,
+  originPattern,
+  PROVIDER_IDS,
+  PROVIDER_PRESETS,
+  type ProviderId,
+  type Settings,
+} from "../../core/settings";
 import { loadSettings, saveSettings } from "../../shared/settings";
 
 function requireElement<T extends HTMLElement>(id: string): T {
@@ -31,6 +40,8 @@ const els = {
   baseUrl: requireElement<HTMLInputElement>("base-url"),
   apiKey: requireElement<HTMLInputElement>("api-key"),
   model: requireElement<HTMLInputElement>("model"),
+  language: requireElement<HTMLSelectElement>("language"),
+  languageOther: requireElement<HTMLInputElement>("language-other"),
   sendImages: requireElement<HTMLInputElement>("send-images"),
   save: requireElement<HTMLButtonElement>("save"),
   test: requireElement<HTMLButtonElement>("test"),
@@ -44,9 +55,35 @@ const els = {
   grantStatus: requireElement<HTMLParagraphElement>("grant-status"),
 };
 
+/**
+ * The `<select>` value standing for "not in the list". UI-local and never persisted: it is
+ * deliberately not a shape `normalizeLanguage` could produce from real typing, so it can
+ * never collide with a label a user genuinely wants (someone may well type "other").
+ */
+const OTHER_LANGUAGE = "__other__";
+
 function selectedProvider(): ProviderId {
   const value = els.provider.value;
   return PROVIDER_IDS.includes(value as ProviderId) ? (value as ProviderId) : PROVIDER_IDS[0]!;
+}
+
+/** The picker read as a `Settings.language`; the free-form box wins once "Other…" is chosen. */
+function selectedLanguage(): string {
+  const picked = els.language.value;
+  return normalizeLanguage(picked === OTHER_LANGUAGE ? els.languageOther.value : picked);
+}
+
+/**
+ * Seeds the picker from a stored label. A label that is neither `auto` nor one of the
+ * presets was typed by hand (here, in the panel, or by `desktop -- setup`), so it must come
+ * back as "Other…" with the text filled in — showing "Auto" over it would silently discard
+ * the user's language the next time they saved any other field.
+ */
+function applyLanguage(language: string): void {
+  const listed = language === AUTO_LANGUAGE || LANGUAGE_PRESETS.includes(language);
+  els.language.value = listed ? language : OTHER_LANGUAGE;
+  els.languageOther.value = listed ? "" : language;
+  els.languageOther.hidden = listed;
 }
 
 function setStatus(text: string, kind: "info" | "ok" | "error" = "info"): void {
@@ -107,7 +144,17 @@ function readForm(): { settings: Settings; pattern: string } | null {
     els.model.focus();
     return null;
   }
-  return { settings: { provider: selectedProvider(), baseUrl, apiKey, model, sendImages: els.sendImages.checked }, pattern };
+  return {
+    settings: {
+      provider: selectedProvider(),
+      baseUrl,
+      apiKey,
+      model,
+      sendImages: els.sendImages.checked,
+      language: selectedLanguage(),
+    },
+    pattern,
+  };
 }
 
 function onSave(event: SubmitEvent): void {
@@ -218,6 +265,20 @@ async function init(): Promise<void> {
     els.provider.append(option);
   }
 
+  // Auto first (it is the default), the presets as spelling help, and "Other…" last for a
+  // language the list does not carry — `language` accepts any label, not just these.
+  const languageOptions: Array<[value: string, label: string]> = [
+    [AUTO_LANGUAGE, "Auto (match the message)"],
+    ...LANGUAGE_PRESETS.map((preset): [string, string] => [preset, preset]),
+    [OTHER_LANGUAGE, "Other…"],
+  ];
+  for (const [value, label] of languageOptions) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    els.language.append(option);
+  }
+
   const saved = await loadSettings();
   let currentProvider: ProviderId = saved?.provider ?? PROVIDER_IDS[0]!;
   els.provider.value = currentProvider;
@@ -226,6 +287,7 @@ async function init(): Promise<void> {
     els.apiKey.value = saved.apiKey;
     els.model.value = saved.model;
     els.sendImages.checked = saved.sendImages;
+    applyLanguage(saved.language);
   }
   applyProvider(currentProvider, null);
   await refreshPermission();
@@ -235,6 +297,12 @@ async function init(): Promise<void> {
     applyProvider(next, currentProvider);
     currentProvider = next;
     void refreshPermission();
+  });
+  els.language.addEventListener("change", () => {
+    const custom = els.language.value === OTHER_LANGUAGE;
+    els.languageOther.hidden = !custom;
+    // Revealing an empty box the user has to go and find is the same as not revealing it.
+    if (custom) els.languageOther.focus();
   });
   els.baseUrl.addEventListener("change", () => void refreshPermission());
   els.form.addEventListener("submit", onSave);

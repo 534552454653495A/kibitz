@@ -11,9 +11,8 @@
  * - Ctrl+C only disconnects. Discord is the user's app; it keeps running, minus Kibitz,
  *   until the next reload.
  */
-import { watch } from "node:fs";
+import { type Stats, unwatchFile, watchFile } from "node:fs";
 import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import puppeteer, { type Browser, type Page, type Target } from "puppeteer-core";
 import { log } from "../src/shared/log";
 import { isDiscordUrl } from "./cdp";
@@ -42,6 +41,8 @@ const MAIN_WINDOW_TIMEOUT_MS = 120_000;
 const BUNDLE_DEBOUNCE_MS = 300;
 /** How many times to re-read before giving up on a bundle whose size never settles. */
 const BUNDLE_STABLE_TRIES = 8;
+/** Poll interval for the bundle path. A stat per second is nothing next to a browser. */
+const BUNDLE_POLL_MS = 1000;
 
 export const SECURITY_NOTE =
   "While Discord runs with --remote-debugging-port, that port is open on localhost: any process on this machine can drive Discord through it. Close Discord when you are done.";
@@ -143,31 +144,31 @@ export async function runCompanion(opts: CompanionOptions): Promise<void> {
  * old renderer — image support looked broken because the injected code predated it, and
  * Ctrl+R did not help (the reload re-ran the same captured text).
  *
- * Watches the **directory**, not the file. Measured on Windows: watching the file caught the
- * first `npm run build` and then went permanently deaf, because esbuild replaces the file and
- * the handle keeps watching the inode that is no longer there. A directory watch survives
- * replacement, which is the only way this stays true after the second rebuild.
+ * Polls the **path** with `watchFile` instead of using `fs.watch`, because every inode-based
+ * watch this project tried went deaf on the first real build. Measured twice on Windows:
+ * watching the file died when esbuild replaced it, and watching `dist/` died because
+ * `scripts/build.ts` starts with `fs.rm(dist, { recursive: true })` — the directory itself is
+ * a new inode after every build. Hand-written probes that rewrote the file *inside* `dist`
+ * passed against both and proved nothing (AGENTS.md §12). A path poll has no inode identity
+ * to lose; the cost is one `stat` per second in a process that already sits idle.
  *
- * One build fires several events, so the swap is debounced; and because a read can still land
- * mid-write on platforms that write in place, the text must come back non-empty and the same
- * size twice before it is injected — a truncated bundle would break the panel on next reload.
+ * `mtimeMs === 0` is `watchFile`'s "not there": the build's `rm` fires that before the new
+ * file lands, so it is a signal to wait for the next tick, never to inject.
  */
 function watchBundle(bundlePath: string, pages: ReadonlySet<Page>): () => void {
-  const dir = path.dirname(bundlePath);
-  const name = path.basename(bundlePath);
   let timer: NodeJS.Timeout | undefined;
-  const watcher = watch(dir, (_event, changed) => {
-    // Windows reports the basename; some platforms report null for coalesced events.
-    if (changed !== null && changed !== name) return;
+  const onChange = (current: Stats, previous: Stats): void => {
+    if (current.mtimeMs === 0) return;
+    if (current.mtimeMs === previous.mtimeMs && current.size === previous.size) return;
     clearTimeout(timer);
     timer = setTimeout(() => {
       void reloadBundle(bundlePath, pages);
     }, BUNDLE_DEBOUNCE_MS);
-  });
-  watcher.on("error", (err) => log.warn("bundle watch stopped; restart the companion to pick up rebuilds", err));
+  };
+  watchFile(bundlePath, { interval: BUNDLE_POLL_MS }, onChange);
   return () => {
     clearTimeout(timer);
-    watcher.close();
+    unwatchFile(bundlePath, onChange);
   };
 }
 
@@ -179,8 +180,12 @@ async function readStableBundle(bundlePath: string): Promise<string | undefined>
     try {
       text = await fs.readFile(bundlePath, "utf8");
     } catch (err) {
-      log.debug("bundle unreadable (mid-write?)", err);
-      return undefined;
+      // `npm run build` deletes dist/ before writing it, so "missing" is a normal moment in a
+      // rebuild, not a failure. Keep waiting; only a file that never comes back gives up.
+      log.debug("bundle not readable yet (build in progress?)", err);
+      await new Promise((resolve) => setTimeout(resolve, BUNDLE_DEBOUNCE_MS));
+      previous = -1;
+      continue;
     }
     if (text.length > 0 && text.length === previous) return text;
     previous = text.length;

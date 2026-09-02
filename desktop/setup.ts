@@ -10,7 +10,16 @@
 import * as readline from "node:readline/promises";
 import { classifyError } from "../src/background/providers/errors";
 import { createProvider } from "../src/background/providers/index";
-import { PROVIDER_IDS, PROVIDER_PRESETS, parseSettings, type ProviderId, type Settings } from "../src/core/settings";
+import {
+  AUTO_LANGUAGE,
+  LANGUAGE_PRESETS,
+  normalizeLanguage,
+  parseSettings,
+  PROVIDER_IDS,
+  PROVIDER_PRESETS,
+  type ProviderId,
+  type Settings,
+} from "../src/core/settings";
 import { loadFileSettings, saveFileSettings, settingsPath } from "./settings-store";
 
 const CONNECTION_TEST_TIMEOUT_MS = 30_000;
@@ -32,6 +41,22 @@ async function chooseProvider(prompter: Prompter, current: ProviderId | null): P
     if (picked !== undefined) return picked;
     console.log(`  enter a number between 1 and ${PROVIDER_IDS.length}`);
   }
+}
+
+/**
+ * The answer language, asked as free text instead of a numbered menu: `language` takes any
+ * label ("Türkçe", "Türkçe, samimi ton"), so a menu would turn the presets into a whitelist
+ * the schema deliberately does not have. They are printed purely as spelling help.
+ *
+ * Enter keeps whatever is stored — `auto` when nothing is — for the same reason the key and
+ * the image policy are carried forward below: someone re-running the wizard to change the
+ * model must not find their language silently reset.
+ */
+async function chooseLanguage(prompter: Prompter, current: string | null): Promise<string> {
+  console.log("Answer language:");
+  console.log(`  "${AUTO_LANGUAGE}" answers in the language of the message being explained`);
+  console.log(`  or any label, e.g. ${LANGUAGE_PRESETS.join(", ")}`);
+  return normalizeLanguage(await prompter.ask("Language", current ?? AUTO_LANGUAGE));
 }
 
 async function connectionTest(settings: Settings): Promise<void> {
@@ -81,11 +106,13 @@ export async function runSetup(file: string = settingsPath()): Promise<void> {
     console.log(existing === null ? "API key (typed visibly — clear your terminal afterwards)" : "API key (typed visibly; Enter keeps the saved key)");
     const typedKey = await prompter.ask("Key", existing === null ? null : KEEP_KEY);
     const model = await prompter.ask("Model", keepPreset ? existing.model : preset.model);
+    const language = await chooseLanguage(prompter, existing?.language ?? null);
 
     const apiKey = typedKey === KEEP_KEY && existing !== null ? existing.apiKey : typedKey;
     // The wizard does not ask about images (it is a terminal, and the panel owns that
     // checkbox), so it must carry the stored choice forward instead of re-defaulting it to on.
-    const settings = parseSettings({ provider, baseUrl, apiKey, model, sendImages: existing?.sendImages });
+    // `language` is asked above and already carries the stored value as its Enter default.
+    const settings = parseSettings({ provider, baseUrl, apiKey, model, sendImages: existing?.sendImages, language });
     if (settings === null) {
       console.log("These values do not form a usable configuration (is the base URL an http(s) URL?). Nothing saved.");
       process.exitCode = 2;

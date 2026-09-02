@@ -88,6 +88,8 @@ export interface SettingsInputMessage {
   apiKey: string;
   /** Absent in drafts written before the field existed; absence means "on". */
   sendImages?: boolean;
+  /** Absent in drafts written before the language picker; absence means "auto". */
+  language?: string;
 }
 
 export interface SettingsStatus {
@@ -104,6 +106,8 @@ export interface SettingsDraftMessage {
   hasKey: boolean;
   /** Always present outbound: the host resolved the stored value (or its default) already. */
   sendImages: boolean;
+  /** Always present outbound, `"auto"` included, so the picker never has to guess. */
+  language: string;
 }
 
 export type SaveSettingsMessage = { ok: true } | { ok: false; error: string; grantOrigin?: string };

@@ -12,15 +12,50 @@
  *   - the image toggle starts on when no draft has arrived yet, because that is what a
  *     configuration written before the field existed parses as; a checkbox that flashed
  *     "off" and then corrected itself would read as the setting having been lost;
+ *   - the answer language is a dropdown of suggestions, so a label that is not in it (any
+ *     free-form instruction, e.g. "Türkçe, samimi ton") has to round-trip through the
+ *     "Other…" row: if the select fell back to "Auto" for an unrecognised value, saving an
+ *     unrelated field like the model would silently throw the user's language away;
  *   - on the desktop host the panel shares Discord's window, so the key is typed into a
  *     page Discord's own JS can read. That is a real risk and is stated in the UI rather
  *     than hidden behind a capability flag.
  */
 import { useEffect, useRef, useState } from "preact/hooks";
-import { PROVIDER_IDS, PROVIDER_PRESETS, type ProviderId } from "../../../core/settings";
+import {
+  AUTO_LANGUAGE,
+  LANGUAGE_PRESETS,
+  normalizeLanguage,
+  PROVIDER_IDS,
+  PROVIDER_PRESETS,
+  type ProviderId,
+} from "../../../core/settings";
 import { ACTION_ATTR } from "../../../shared/dom-markers";
 import type { SettingsDraft } from "../../../shell/types";
 import type { PanelContext, PanelView } from "../views";
+
+/**
+ * The select value that reveals the free-form row. Not a language and never submitted: it
+ * has to be distinguishable from every label a user could legitimately choose, hence the
+ * dunder shape rather than something like "other".
+ */
+const OTHER_LANGUAGE = "__other__";
+
+interface LanguageChoice {
+  /** What the select shows: `AUTO_LANGUAGE`, a preset label, or `OTHER_LANGUAGE`. */
+  choice: string;
+  /** The free-form label, kept even while a preset is selected so toggling back is lossless. */
+  text: string;
+}
+
+/**
+ * A stored language the dropdown cannot represent is not an error — `language` accepts any
+ * label — so it opens on "Other…" with the value in the text box, ready to be saved back
+ * unchanged.
+ */
+function seedLanguage(language: string): LanguageChoice {
+  const listed = language === AUTO_LANGUAGE || LANGUAGE_PRESETS.includes(language);
+  return listed ? { choice: language, text: "" } : { choice: OTHER_LANGUAGE, text: language };
+}
 
 function SettingsView({ ctx }: { ctx: PanelContext }) {
   const { actions, capabilities, keyStorageHint } = ctx;
@@ -31,6 +66,9 @@ function SettingsView({ ctx }: { ctx: PanelContext }) {
   const [model, setModel] = useState(draft?.model ?? PROVIDER_PRESETS["openai-compatible"].model);
   const [apiKey, setApiKey] = useState("");
   const [sendImages, setSendImages] = useState(draft?.sendImages ?? true);
+  // Absent draft reads as `AUTO_LANGUAGE` for the same reason the toggle starts on: that is
+  // how a configuration written before this field existed parses.
+  const [language, setLanguage] = useState<LanguageChoice>(() => seedLanguage(draft?.language ?? AUTO_LANGUAGE));
   const [revealed, setRevealed] = useState(false);
 
   // The initial state above already carries whatever draft existed at mount, so the effect
@@ -47,6 +85,7 @@ function SettingsView({ ctx }: { ctx: PanelContext }) {
     setBaseUrl(draft.baseUrl);
     setModel(draft.model);
     setSendImages(draft.sendImages);
+    setLanguage(seedLanguage(draft.language));
     // A key that was just saved must not linger in the DOM; the placeholder takes over.
     if (draft.hasKey) setApiKey("");
   }, [draft]);
@@ -64,6 +103,11 @@ function SettingsView({ ctx }: { ctx: PanelContext }) {
     setModel((current) => (current === "" || current === from.model ? to.model : current));
     setProvider(next);
   };
+
+  // What actually gets saved: a preset or "auto" as chosen, and a free-form label only after
+  // `normalizeLanguage` — which also turns an "Other…" row the user left blank into "auto",
+  // so an empty box cannot save an instruction that says nothing.
+  const languageValue = language.choice === OTHER_LANGUAGE ? normalizeLanguage(language.text) : language.choice;
 
   return (
     <div class="view settings">
@@ -134,12 +178,53 @@ function SettingsView({ ctx }: { ctx: PanelContext }) {
         </small>
       </label>
 
+      <label class="field">
+        <span>Answer language</span>
+        <select
+          value={language.choice}
+          onChange={(event) => {
+            const choice = event.currentTarget.value;
+            // The typed label survives a detour through a preset, so picking one by mistake
+            // is not the same as deleting what the user wrote.
+            setLanguage((current) => ({ choice, text: current.text }));
+          }}
+        >
+          <option value={AUTO_LANGUAGE}>Auto (match the message)</option>
+          {LANGUAGE_PRESETS.map((entry) => (
+            <option value={entry} key={entry}>
+              {entry}
+            </option>
+          ))}
+          <option value={OTHER_LANGUAGE}>Other…</option>
+        </select>
+        {language.choice === OTHER_LANGUAGE && (
+          <input
+            type="text"
+            value={language.text}
+            spellcheck={false}
+            // The enclosing label names the select, so this box needs its own name.
+            aria-label="Custom answer language"
+            placeholder="Türkçe, samimi ton"
+            onInput={(event) => {
+              const text = event.currentTarget.value;
+              setLanguage((current) => ({ choice: current.choice, text }));
+            }}
+          />
+        )}
+        <small>
+          Auto answers in the language of the message. A fixed language answers in it whatever
+          the messages are in.
+        </small>
+      </label>
+
       <div class="toolbar">
         <button
           class="button primary"
           {...{ [ACTION_ATTR]: "save-settings" }}
           disabled={busy}
-          onClick={() => void actions.saveSettings({ provider, baseUrl, model, apiKey, sendImages })}
+          onClick={() =>
+            void actions.saveSettings({ provider, baseUrl, model, apiKey, sendImages, language: languageValue })
+          }
         >
           Save
         </button>

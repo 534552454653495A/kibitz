@@ -2,7 +2,7 @@ import { setImmediate as nextTick } from "node:timers/promises";
 import { beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { createDesktopRequestHandler, type DesktopRequestHandler, type RequestHandlerDeps } from "../../desktop/request-handler";
 import type { ChatMessage } from "../../src/core/messaging";
-import type { Settings } from "../../src/core/settings";
+import { AUTO_LANGUAGE, type Settings } from "../../src/core/settings";
 import type { DesktopDelivery } from "../../src/shell/desktop-protocol";
 
 // The provider is the network; the handler's contract is what it does around it — including
@@ -30,6 +30,7 @@ const SETTINGS: Settings = {
   apiKey: "sk-very-secret",
   model: "m",
   sendImages: true,
+  language: AUTO_LANGUAGE,
 };
 const MESSAGES: ChatMessage[] = [{ role: "user", content: "hi" }];
 const WITH_IMAGE: ChatMessage[] = [
@@ -219,7 +220,14 @@ describe("settings requests", () => {
     const h = harness(SETTINGS);
     const json = await h.handler.handle(JSON.stringify({ type: "load-settings" }));
     expect(JSON.parse(json)).toEqual({
-      draft: { provider: "anthropic", baseUrl: "https://example.test", model: "m", hasKey: true, sendImages: true },
+      draft: {
+        provider: "anthropic",
+        baseUrl: "https://example.test",
+        model: "m",
+        hasKey: true,
+        sendImages: true,
+        language: AUTO_LANGUAGE,
+      },
     });
     expect(json).not.toContain(SETTINGS.apiKey);
   });
@@ -241,6 +249,29 @@ describe("settings requests", () => {
     const input = { provider: "anthropic", baseUrl: "https://example.test", model: "m", apiKey: "", sendImages: false };
     expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-settings", input })))).toEqual({ ok: true });
     expect(h.written.settings).toEqual({ ...SETTINGS, sendImages: false });
+  });
+
+  it("load-settings reports a stored language, still without the key", async () => {
+    const h = harness({ ...SETTINGS, language: "Türkçe" });
+    const json = await h.handler.handle(JSON.stringify({ type: "load-settings" }));
+    expect(JSON.parse(json)).toMatchObject({ draft: { language: "Türkçe", hasKey: true } });
+    expect(json).not.toContain(SETTINGS.apiKey);
+  });
+
+  it("save-settings writes a language through to settings.json", async () => {
+    const h = harness(SETTINGS);
+    const input = { provider: "anthropic", baseUrl: "https://example.test", model: "m", apiKey: "", language: "Türkçe" };
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-settings", input })))).toEqual({ ok: true });
+    expect(h.written.settings).toEqual({ ...SETTINGS, language: "Türkçe" });
+  });
+
+  // A renderer bundle from before the picker sends no `language`; reading that silence as
+  // "auto" would reset a language the wizard or the options page had configured.
+  it("save-settings that omits language keeps the stored one instead of resetting it to auto", async () => {
+    const h = harness({ ...SETTINGS, language: "Türkçe" });
+    const input = { provider: "anthropic", baseUrl: "https://example.test", model: "claude-next", apiKey: "" };
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-settings", input })))).toEqual({ ok: true });
+    expect(h.written.settings).toEqual({ ...SETTINGS, model: "claude-next", language: "Türkçe" });
   });
 
   it("save-settings refuses and writes nothing when neither a typed nor a stored key exists", async () => {
