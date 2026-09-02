@@ -41,17 +41,24 @@ Terminology used throughout:
 
 ```
 manifest.jsonc          Commented source of truth; build strips comments → dist/manifest.json
-scripts/build.ts        esbuild: 4 entry points → dist/ (content, discord-bridge, background, options)
+scripts/build.ts        esbuild: 5 entry points → dist/ (content, discord-bridge, background, options,
+                        desktop-renderer); fails if the desktop bundle references chrome.*
 src/core/               types.ts (UniversalMessage), adapter.ts (PlatformAdapter), validate.ts,
-                        messaging.ts (panel↔background protocol), prompt.ts, context.ts, prompts/*.md
+                        messaging.ts (shell protocol), settings.ts (LLM settings schema), prompt.ts,
+                        context.ts, prompts/*.md
 src/adapters/discord/   selectors.ts, bridge-protocol.ts, bridge.main.ts, normalize.ts, adapter.ts, scroller.ts
-src/content/            index.ts (entry), injector.ts (MutationObserver → buttons)
-src/ui/                 button/, panel/ (Preact in Shadow DOM), options/ (settings page)
-src/background/         index.ts (service worker), providers/ (openai-compatible, anthropic, sse)
-src/shared/             ext.ts, log.ts, page-rpc.ts, settings.ts, dom-markers.ts
-probe/                  run.ts, checks.ts, report.ts, outline.ts, page-helper.ts, discord-session.ts,
-                        fixtures/discord-like.html (contract-shaped page for `npm run probe:selftest`)
-tests/                  vitest; mirrors src/ layout
+src/shell/              types.ts (Shell), extension.ts (Port to the service worker),
+                        desktop.ts + desktop-protocol.ts (CDP binding to the companion)
+src/content/            start.ts (boot shared by hosts), index.ts (extension entry), injector.ts
+src/desktop/            renderer.ts (bundle injected into Discord desktop)
+src/ui/                 button/, panel/ (Preact in Shadow DOM), options/ (extension settings page)
+src/background/         index.ts (service worker), providers/ (openai-compatible, anthropic, sse, errors)
+src/shared/             ext.ts, log.ts, page-rpc.ts, settings.ts (chrome.storage), dom-markers.ts
+desktop/                kibitz-desktop companion (Node): cli.ts, companion.ts, inject.ts,
+                        request-handler.ts, discord-launch.ts, settings-store.ts, setup.ts, cdp.ts
+probe/                  run.ts (--fixture, --shell extension|desktop), checks.ts, report.ts, outline.ts,
+                        page-helper.ts, discord-session.ts, fixtures/discord-like.html
+tests/                  vitest; mirrors src/ layout (+ tests/scripts/*.test.sh run by ci.yml)
 .github/workflows/      ci.yml, canary-probe.yml, ai-fix.yml, ai-review.yml
 .github/ai/             prompts, output schemas and the path allowlist for the agents
 ```
@@ -130,6 +137,30 @@ requires editing `src/core/`, the abstraction leaked; fix the abstraction, do no
 Lint by grep: `src/core/` must contain no `discord`, no `chrome.`, no `document.` outside
 `page-rpc`-style generic DOM plumbing that lives in `src/shared/`.
 
+### 3.8 The UI talks to its host through one seam
+
+Everything the in-page UI needs from its runtime — streaming an answer, asking whether a
+key is configured, opening settings — goes through `Shell` (`src/shell/types.ts`). Two hosts
+implement it: the Chrome extension (`shell/extension.ts`: a Port to the service worker,
+`chrome.storage`) and the Discord desktop companion (`shell/desktop.ts`: a CDP binding to a
+Node process that holds the settings file and makes the HTTP calls).
+**Because:** the same panel, injector and adapter must run inside Discord's Electron
+window, where there is no extension API at all. Desktop support was added without
+touching `src/core/`, `src/adapters/` or `src/ui/panel/state.ts` — that is the test of the
+seam, and the build enforces it: `dist/desktop-renderer.js` must not reference `chrome.*`.
+
+Consequences: `src/ui/` and `src/content/` never import `shared/ext.ts`; provider code and
+error classification (`src/background/providers/`) are Node-safe because the companion
+reuses them; the LLM settings schema lives in `src/core/settings.ts` so "configured" means
+the same thing in `chrome.storage.local` and in `settings.json`.
+
+Why CDP and not a Vencord-style patcher: a patcher rewrites files inside Discord's install
+and dies on every Discord update; the companion changes nothing on disk and survives
+updates, at the price of starting Discord with `--remote-debugging-port` and keeping a
+process running. The cost that must stay documented: while Discord listens on that port,
+any local process can drive it (including reading the session token). The port is bound to
+127.0.0.1 and chosen from 9300–9399; there is no authentication in CDP.
+
 ---
 
 ## 4. The selector contract
@@ -166,11 +197,15 @@ Known canonical homes:
 | Object type guard | `isRecord` from `src/core/validate.ts` |
 | Validate a message at a boundary | `assertUniversalMessage` (`src/core/validate.ts`) |
 | Cross-world RPC | `createRpcServer` / `createRpcClient` (`src/shared/page-rpc.ts`) |
-| Extension API | `ext` from `src/shared/ext.ts` (never bare `chrome.` outside `src/shared/`, `src/background/`, `src/ui/options/`) |
+| Extension API | `ext` from `src/shared/ext.ts` (only inside `src/shell/extension.ts`, `src/shared/`, `src/background/`, `src/ui/options/`; never in `src/ui/panel`, `src/content`, `src/core`, `desktop/`) |
+| Host runtime from the UI | `Shell` (`src/shell/types.ts`): `createExtensionShell()` / `createDesktopShell()` |
 | Logging | `log` from `src/shared/log.ts` (prefix is what the probe filters on) |
-| Settings | `loadSettings` / `saveSettings` / `originPattern` (`src/shared/settings.ts`) |
+| Settings schema / validation | `parseSettings`, `PROVIDER_PRESETS`, `originPattern` (`src/core/settings.ts`) |
+| Settings persistence | extension: `src/shared/settings.ts` (chrome.storage); desktop: `desktop/settings-store.ts` (settings.json) |
+| LLM providers + error → ChatErrorCode | `createProvider` (`src/background/providers/index.ts`), `classifyError` (`providers/errors.ts`) — Node-safe, shared with the companion |
 | Prompt text | `.md` files in `src/core/prompts/`, rendered by `src/core/prompt.ts` |
 | SSE parsing | `src/background/providers/sse.ts` |
+| Inject into a Discord window over CDP | `attachKibitz` / `deliver` (`desktop/inject.ts`) — the probe's desktop mode uses the same functions |
 
 Missing capability? Extend the canonical helper; do not fork it locally.
 
@@ -220,7 +255,9 @@ Each `it(...)` title should read as the failure mode: `it("keeps // inside URL s
   `// @vitest-environment jsdom` at the top of the file.
 - No test may import from `dist/`.
 - The probe is not a unit test and is not run by `npm test`. It is the integration signal.
-  `npm run probe:selftest` (ci.yml) is the account-free half of it and is a **wiring**
+  `npm run probe:selftest` (ci.yml) and `npm run probe:selftest:desktop` (same checks, same
+  fixture, but plain Chrome + the companion's `attachKibitz` instead of the extension) are
+  the account-free half of it and a **wiring**
   regression signal only: the fixture is written by us to satisfy `selectors.ts`, so every
   check passes by construction. A green self-test proves injector → RPC → bridge → adapter
   → panel → scroll-back agree with each other. It proves nothing about Discord: the two DOM
@@ -432,3 +469,12 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   `pipefail` turned into a red report job → the script now handles the missing directory.
   Verification that counts for workflow changes: `gh workflow run … --ref <branch>` and
   read the job conclusions, not a local YAML parse.
+- **2026-09-02 — Discord desktop support (owner's request).** Options weighed: a
+  Vencord-style patcher (rewrites `resources/app` inside Discord's install, breaks on every
+  Discord update, GPL pattern — code off-limits), a BetterDiscord plugin (depends on a
+  third-party mod), or a CDP companion. Chosen: the companion — no files touched, survives
+  updates, reuses the probe's Puppeteer path — accepting that Discord must be launched with
+  `--remote-debugging-port` and that the port is unauthenticated on localhost.
+  → Section 3.8; the `Shell` seam; `dist/desktop-renderer.js` must be chrome-free (build
+  check); Windows is the only exercised platform, macOS/Linux launch paths are marked
+  untested in `desktop/discord-launch.ts`.

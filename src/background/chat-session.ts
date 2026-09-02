@@ -1,42 +1,18 @@
 /**
  * One chat Port = one session: the request/cancel state machine behind CHAT_PORT_NAME.
  *
- * Kept apart from the service-worker entry so the entry is only listener wiring. The
- * key decision here is the error-code mapping: the panel decides what to show (an
- * "open options" button, a "retry" button, a plain message) from `code` alone, so every
- * failure must land on exactly one ChatErrorCode, and classification is by error class
- * or abort state — never by matching message text, which providers change freely.
+ * Kept apart from the service-worker entry so the entry is only listener wiring. Error
+ * classification is shared with the desktop companion (providers/errors.ts) so both
+ * shells map a given failure to the same ChatErrorCode.
  */
-import type { ChatErrorCode, ChatRequest, PortRequest, PortResponse } from "../core/messaging";
+import type { ChatRequest, PortRequest, PortResponse } from "../core/messaging";
+import { originPattern } from "../core/settings";
 import { isRecord } from "../core/validate";
 import { ext } from "../shared/ext";
 import { log } from "../shared/log";
-import { loadSettings, originPattern } from "../shared/settings";
-import { createProvider, ProviderHttpError, ProviderStreamError } from "./providers";
-
-interface PortError {
-  code: ChatErrorCode;
-  message: string;
-}
-
-export function classifyError(err: unknown, aborted: boolean): PortError {
-  // The abort check comes first: an aborted fetch may surface as AbortError, as a
-  // stream read failure, or as nothing at all — the signal is the ground truth.
-  if (aborted || (err instanceof Error && err.name === "AbortError")) {
-    return { code: "aborted", message: "Request cancelled." };
-  }
-  if (err instanceof ProviderHttpError) return { code: "http", message: `HTTP ${err.status}: ${err.bodyExcerpt}` };
-  if (err instanceof ProviderStreamError) return { code: "provider", message: err.message };
-  // fetch() rejects with a TypeError for everything that never produced a response:
-  // offline, DNS, a CORS block, or a host permission that was revoked after saving.
-  if (err instanceof TypeError) {
-    return {
-      code: "network",
-      message: `Could not reach the provider (${err.message}). Check that you are online, that the base URL is right, and that host permission was granted when you saved settings.`,
-    };
-  }
-  return { code: "provider", message: err instanceof Error ? err.message : String(err) };
-}
+import { loadSettings } from "../shared/settings";
+import { createProvider } from "./providers";
+import { classifyError } from "./providers/errors";
 
 function parseRequest(raw: unknown): PortRequest | null {
   if (!isRecord(raw) || typeof raw.requestId !== "string") return null;

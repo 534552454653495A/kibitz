@@ -12,14 +12,8 @@
 import { CHAT_PORT_NAME, type PortResponse } from "../../core/messaging";
 import { ext } from "../../shared/ext";
 import { log } from "../../shared/log";
-import {
-  loadSettings,
-  originPattern,
-  PROVIDER_PRESETS,
-  saveSettings,
-  type ProviderId,
-  type Settings,
-} from "../../shared/settings";
+import { originPattern, PROVIDER_PRESETS, type ProviderId, type Settings } from "../../core/settings";
+import { loadSettings, saveSettings } from "../../shared/settings";
 
 function requireElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);

@@ -1,32 +1,18 @@
 /**
- * Panel-side client for the streaming chat protocol (core/messaging.ts).
+ * Extension shell: the in-page side of the service-worker protocol (core/messaging.ts).
  *
  * One Port per request, not one long-lived Port for the panel's lifetime: an MV3 service
  * worker may be terminated between two answers, and a Port that died with it looks
  * connected until the first postMessage throws. Connecting per request keeps the worker
  * alive exactly as long as one answer takes and turns "worker died" into a clean reject.
  */
-import type { ChatErrorCode, ChatMessage, PortRequest, PortResponse } from "../../core/messaging";
-import { CHAT_PORT_NAME } from "../../core/messaging";
-import { isRecord } from "../../core/validate";
-import { ext } from "../../shared/ext";
+import type { ChatMessage, PortRequest, PortResponse, RuntimeRequest, SettingsStatus } from "../core/messaging";
+import { CHAT_PORT_NAME } from "../core/messaging";
+import { isRecord } from "../core/validate";
+import { ext } from "../shared/ext";
+import { ChatError, type Shell, type StreamChatOptions } from "./types";
 
-export class ChatError extends Error {
-  override readonly name = "ChatError";
-  constructor(
-    readonly code: ChatErrorCode,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
-export interface StreamChatOptions {
-  onDelta: (text: string) => void;
-  signal: AbortSignal;
-}
-
-export function streamChat(messages: ChatMessage[], { onDelta, signal }: StreamChatOptions): Promise<void> {
+function streamChat(messages: ChatMessage[], { onDelta, signal }: StreamChatOptions): Promise<void> {
   if (signal.aborted) return Promise.reject(new ChatError("aborted", "cancelled before start"));
 
   const requestId = crypto.randomUUID();
@@ -78,4 +64,27 @@ export function streamChat(messages: ChatMessage[], { onDelta, signal }: StreamC
   const request: PortRequest = { type: "chat", requestId, messages };
   port.postMessage(request);
   return promise;
+}
+
+async function settingsStatus(): Promise<SettingsStatus> {
+  const request: RuntimeRequest = { type: "settings-status" };
+  const reply: unknown = await ext.runtime.sendMessage(request);
+  if (!isRecord(reply) || typeof reply.configured !== "boolean") {
+    throw new Error("background returned no settings status");
+  }
+  return reply as unknown as SettingsStatus;
+}
+
+async function openOptions(): Promise<void> {
+  const request: RuntimeRequest = { type: "open-options" };
+  await ext.runtime.sendMessage(request);
+}
+
+export function createExtensionShell(): Shell {
+  return {
+    streamChat,
+    settingsStatus,
+    openOptions,
+    optionsHint: "Your key stays in this browser.",
+  };
 }

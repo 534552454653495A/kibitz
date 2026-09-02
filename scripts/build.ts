@@ -27,7 +27,21 @@ const ENTRIES: Record<string, string> = {
   background: "src/background/index.ts",
   // options page: API key / provider / model
   options: "src/ui/options/options.ts",
+  // desktop: bridge + content + desktop shell in ONE bundle, injected into Discord's
+  // window over CDP by desktop/companion.ts (no extension runtime exists there)
+  "desktop-renderer": "src/desktop/renderer.ts",
 };
+
+/**
+ * The desktop bundle runs where `chrome` is undefined; one stray import of shared/ext.ts
+ * would throw at load and take the whole injection down silently. Fail the build instead.
+ */
+const CHROME_API = /\bchrome\.(runtime|storage|permissions|action|tabs)\b/;
+async function assertDesktopBundleIsChromeFree(): Promise<void> {
+  const text = await fs.readFile(path.join(outDir, "desktop-renderer.js"), "utf8");
+  const hit = CHROME_API.exec(text);
+  if (hit) throw new Error(`dist/desktop-renderer.js references ${hit[0]}: the desktop bundle must not touch the extension API`);
+}
 
 const STATIC_FILES: Record<string, string> = {
   "options.html": "src/ui/options/options.html",
@@ -83,6 +97,7 @@ async function main(): Promise<void> {
 
   await ctx.rebuild();
   await ctx.dispose();
+  await assertDesktopBundleIsChromeFree();
   await copyStatic();
   console.log(`built kibitz ${manifest.version} → ${path.relative(root, outDir)}/`);
 }

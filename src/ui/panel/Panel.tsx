@@ -23,6 +23,8 @@ export interface PanelProps {
   platform: Platform;
   model: PanelModel;
   actions: PanelActions;
+  /** Host-specific sentence under the "configure" call-to-action (Shell.optionsHint). */
+  optionsHint: string;
 }
 
 function MessageCard({ message }: { message: UniversalMessage }) {
@@ -97,7 +99,7 @@ function Composer({ actions, disabled }: { actions: PanelActions; disabled: bool
   );
 }
 
-export function Panel({ platform, model, actions }: PanelProps) {
+export function Panel({ platform, model, actions, optionsHint }: PanelProps) {
   const scanBusy = model.scan.state === "running";
   const scanLabel =
     model.scan.state === "running"
@@ -125,7 +127,7 @@ export function Panel({ platform, model, actions }: PanelProps) {
 
       {model.status === "ready" && model.configured === false && (
         <div class="cta">
-          <p>Kibitz needs an API key before it can explain anything. Your key stays in this browser.</p>
+          <p>Kibitz needs an API key before it can explain anything. {optionsHint}</p>
           <button class="button primary" {...{ [ACTION_ATTR]: "open-options" }} onClick={actions.openOptions}>
             Configure API key
           </button>

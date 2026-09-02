@@ -9,10 +9,9 @@
  */
 import { h, render } from "preact";
 import type { PlatformAdapter } from "../../core/adapter";
-import type { ChatMessage, RuntimeRequest, SettingsStatus } from "../../core/messaging";
+import type { ChatMessage } from "../../core/messaging";
 import { appendFollowUp, buildExplainMessages, buildSynthesisMessages } from "../../core/prompt";
 import type { MessageRef, UniversalMessage } from "../../core/types";
-import { isRecord } from "../../core/validate";
 import {
   PANEL_ERROR_ATTR,
   PANEL_HOST_ATTR,
@@ -21,9 +20,8 @@ import {
   SCAN_COUNT_ATTR,
   SCAN_STATE_ATTR,
 } from "../../shared/dom-markers";
-import { ext } from "../../shared/ext";
 import { log } from "../../shared/log";
-import { ChatError, streamChat } from "./chat-client";
+import { ChatError, type Shell } from "../../shell/types";
 import { Panel, type PanelActions } from "./Panel";
 import panelCss from "./panel.css";
 import { INITIAL, reduce, type PanelAction, type PanelModel } from "./state";
@@ -43,16 +41,7 @@ function describeError(err: unknown): string {
   return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
 }
 
-async function fetchSettingsStatus(): Promise<SettingsStatus> {
-  const request: RuntimeRequest = { type: "settings-status" };
-  const reply: unknown = await ext.runtime.sendMessage(request);
-  if (!isRecord(reply) || typeof reply.configured !== "boolean") {
-    throw new Error("background returned no settings status");
-  }
-  return reply as unknown as SettingsStatus;
-}
-
-export function mountPanel(adapter: PlatformAdapter): PanelHandle {
+export function mountPanel(adapter: PlatformAdapter, shell: Shell): PanelHandle {
   const host = document.createElement("div");
   host.setAttribute(PANEL_HOST_ATTR, "1");
   const shadow = host.attachShadow({ mode: "open" });
@@ -80,7 +69,7 @@ export function mountPanel(adapter: PlatformAdapter): PanelHandle {
   function dispatch(action: PanelAction): void {
     model = reduce(model, action);
     mirror();
-    render(h(Panel, { platform: adapter.platform, model, actions }), root);
+    render(h(Panel, { platform: adapter.platform, model, actions, optionsHint: shell.optionsHint }), root);
   }
 
   function stopStream(): void {
@@ -99,7 +88,7 @@ export function mountPanel(adapter: PlatformAdapter): PanelHandle {
     streamAbort = abort;
     dispatch({ type: "stream-start", history });
     try {
-      await streamChat(history, {
+      await shell.streamChat(history, {
         signal: abort.signal,
         onDelta: (text) => {
           if (owner === session) dispatch({ type: "delta", text });
@@ -127,7 +116,7 @@ export function mountPanel(adapter: PlatformAdapter): PanelHandle {
   async function openFlow(ref: MessageRef, owner: number): Promise<void> {
     // Settings and the message load in parallel; "ready" waits only for the message so
     // the probe (and the user) see the card even when the background is slow.
-    const settings = fetchSettingsStatus().then(
+    const settings = shell.settingsStatus().then(
       (s) => s.configured,
       (err: unknown) => {
         log.warn("settings-status failed", err);
@@ -203,8 +192,7 @@ export function mountPanel(adapter: PlatformAdapter): PanelHandle {
       stopStream();
     },
     openOptions() {
-      const request: RuntimeRequest = { type: "open-options" };
-      void ext.runtime.sendMessage(request).catch((err: unknown) => log.warn("open-options failed", err));
+      void shell.openOptions().catch((err: unknown) => log.warn("open-options failed", err));
     },
   };
 

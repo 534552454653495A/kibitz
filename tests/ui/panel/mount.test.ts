@@ -12,6 +12,7 @@ import {
   SCAN_COUNT_ATTR,
   SCAN_STATE_ATTR,
 } from "../../../src/shared/dom-markers";
+import { createExtensionShell } from "../../../src/shell/extension";
 import { mountPanel } from "../../../src/ui/panel/mount";
 
 interface FakePort {
@@ -113,7 +114,7 @@ beforeEach(() => {
 
 describe("mountPanel host attributes", () => {
   it("starts closed and moves loading → ready with the message id when the read succeeds", async () => {
-    const panel = mountPanel(adapter());
+    const panel = mountPanel(adapter(), createExtensionShell());
     expect(host().getAttribute(PANEL_STATE_ATTR)).toBe("closed");
     panel.open(ref);
     expect(host().getAttribute(PANEL_STATE_ATTR)).toBe("loading");
@@ -125,14 +126,14 @@ describe("mountPanel host attributes", () => {
   it("moves to error with name: message when the adapter read rejects", async () => {
     const err = new Error("bridge timed out");
     err.name = "RpcTimeoutError";
-    const panel = mountPanel(adapter({ readMessage: () => Promise.reject(err) }));
+    const panel = mountPanel(adapter({ readMessage: () => Promise.reject(err) }), createExtensionShell());
     panel.open(ref);
     await untilState(PANEL_STATE_ATTR, "error");
     expect(host().getAttribute(PANEL_ERROR_ATTR)).toBe("RpcTimeoutError: bridge timed out");
   });
 
   it("streams the explanation into the panel once the message is ready", async () => {
-    const panel = mountPanel(adapter());
+    const panel = mountPanel(adapter(), createExtensionShell());
     panel.open(ref);
     const port = await untilPort(0);
     const first = port.sent[0];
@@ -148,7 +149,7 @@ describe("mountPanel host attributes", () => {
 
   it("offers the options page instead of calling the LLM when nothing is configured", async () => {
     fakeRuntime.configured = false;
-    const panel = mountPanel(adapter());
+    const panel = mountPanel(adapter(), createExtensionShell());
     panel.open(ref);
     const cta = await untilAction("open-options");
     expect(host().getAttribute(PANEL_STATE_ATTR)).toBe("ready");
@@ -161,15 +162,13 @@ describe("mountPanel host attributes", () => {
     fakeRuntime.configured = false;
     const thread: UniversalThread = { anchor: message, messages: [message, { ...message, id: "m2" }], truncated: false };
     const seenDuringScan: string[] = [];
-    const panel = mountPanel(
-      adapter({
-        collectAround: (_ref, _opts, onProgress) => {
-          onProgress?.({ collected: 1 });
-          seenDuringScan.push(host().getAttribute(SCAN_STATE_ATTR) ?? "", host().getAttribute(SCAN_COUNT_ATTR) ?? "");
-          return Promise.resolve(thread);
-        },
-      }),
-    );
+    const panel = mountPanel(adapter({
+      collectAround: (_ref, _opts, onProgress) => {
+        onProgress?.({ collected: 1 });
+        seenDuringScan.push(host().getAttribute(SCAN_STATE_ATTR) ?? "", host().getAttribute(SCAN_COUNT_ATTR) ?? "");
+        return Promise.resolve(thread);
+      },
+    }), createExtensionShell());
     panel.open(ref);
     (await untilAction("scan")).click();
     await untilState(SCAN_STATE_ATTR, "done");
@@ -180,14 +179,14 @@ describe("mountPanel host attributes", () => {
 
   it("marks the scan as failed when collection rejects", async () => {
     fakeRuntime.configured = false;
-    const panel = mountPanel(adapter({ collectAround: () => Promise.reject(new Error("scroll container lost")) }));
+    const panel = mountPanel(adapter({ collectAround: () => Promise.reject(new Error("scroll container lost")) }), createExtensionShell());
     panel.open(ref);
     (await untilAction("scan")).click();
     await untilState(SCAN_STATE_ATTR, "error");
   });
 
   it("closes on the close action and on Escape, clearing the message id", async () => {
-    const panel = mountPanel(adapter());
+    const panel = mountPanel(adapter(), createExtensionShell());
     panel.open(ref);
     await untilState(PANEL_STATE_ATTR, "ready");
     action("close").click();
@@ -202,11 +201,9 @@ describe("mountPanel host attributes", () => {
   it("ignores a late read result from a message that was replaced by a newer open", async () => {
     const { promise: slow, resolve } = Promise.withResolvers<UniversalMessage>();
     let calls = 0;
-    const panel = mountPanel(
-      adapter({
-        readMessage: () => (++calls === 1 ? slow : Promise.resolve({ ...message, id: "m2", content: "second" })),
-      }),
-    );
+    const panel = mountPanel(adapter({
+      readMessage: () => (++calls === 1 ? slow : Promise.resolve({ ...message, id: "m2", content: "second" })),
+    }), createExtensionShell());
     panel.open(ref);
     panel.open({ ...ref, messageId: "m2" });
     await untilState(PANEL_STATE_ATTR, "ready");

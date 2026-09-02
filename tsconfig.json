@@ -17,5 +17,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src", "probe", "scripts", "tests", "types"]
+  "include": ["src", "probe", "scripts", "tests", "types", "desktop"]
 }

@@ -55,6 +55,37 @@ scripts, MV3) but requires `background.scripts` instead of `service_worker` and 
 `browser_specific_settings.gecko` block. Contributions welcome; the seam is
 `src/shared/ext.ts` and `manifest.jsonc`.
 
+### Discord desktop app
+
+The desktop app is Electron running the same web client, so Kibitz works there too — but
+browser extensions cannot be installed into it. Instead, a small companion process starts
+Discord with a DevTools port and injects Kibitz over the Chrome DevTools Protocol. No
+file inside Discord's installation is modified, so Discord updates do not break it.
+
+```bash
+npm run build                  # builds dist/desktop-renderer.js alongside the extension
+npm run desktop -- setup       # provider, base URL, API key, model → settings.json (once)
+npm run desktop                # launches Discord with the flag, attaches, stays running
+```
+
+- Quit Discord first (or pass `--relaunch`): a running Discord cannot be given the flag
+  afterwards — Electron's single-instance lock forwards a second launch's arguments to the
+  first instance, which ignores them.
+- Keep the terminal open; `Ctrl+C` disconnects Kibitz and leaves Discord running.
+  Reload Discord (`Ctrl+R`) after changing settings.
+- Settings live in `%APPDATA%\kibitz\settings.json` (Windows), `~/Library/Application
+  Support/kibitz/` (macOS) or `~/.config/kibitz/` (Linux), readable only by your user.
+- `npm run desktop -- help` lists `--port`, `--attach` (connect to a Discord you started
+  yourself with `--remote-debugging-port=<port>`), `--relaunch`, `--bundle`, `--settings`.
+
+**Security note.** While Discord runs with `--remote-debugging-port`, any process on your
+machine can control it through that port (including reading your session) — the
+protocol has no authentication. The port is bound to `127.0.0.1` and picked from
+9300–9399. If you do not trust every program on your machine, use the extension instead.
+
+Tested on Windows. macOS (`open -a Discord --args …`) and Linux (`discord` on PATH or the
+Flatpak) launch paths exist but have not been exercised; reports welcome.
+
 ---
 
 ## Configure your key (BYO key)
