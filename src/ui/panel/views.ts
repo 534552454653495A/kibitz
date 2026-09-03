@@ -28,8 +28,7 @@ export interface PanelContext {
 
 export interface PanelView {
   /** Mirrored onto the host as VIEW_ATTR; also the tab's action name suffix (`view-<id>`). */
-  id: "chat" | "settings";
-  /** Tab label. */
+  id: "chat" | "settings" | "history";
   title: string;
   /** Single glyph for the tab in narrow layouts. */
   icon: string;

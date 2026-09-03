@@ -31,4 +31,17 @@ export interface PanelActions {
   resetLayout(): void;
   /** Clipboard for one conversation turn. */
   copyTurn(index: number): void;
+  /**
+   * Saved conversations. `searchConversations` is the instant local filter (it only writes
+   * the query into the model); `askConversations` is the one billed request that sends a
+   * catalogue of titles and excerpts to the provider — two entries, not one debounced call,
+   * because the second spends the user's money and the first must not.
+   */
+  searchConversations(query: string): void;
+  askConversations(question: string): void;
+  openConversation(id: string): void;
+  deleteConversation(id: string): void;
+  /** Arms or disarms "delete all"; the deletion itself is `clearConversations`. */
+  confirmClearConversations(pending: boolean): void;
+  clearConversations(): void;
 }

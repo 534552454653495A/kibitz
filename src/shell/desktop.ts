@@ -13,10 +13,11 @@
  * answer the companion keeps streaming until it processes the cancel, so a delta or a late
  * error for a stream that no longer exists is the normal case, not a protocol violation.
  */
+import type { ConversationRecord, ConversationSummary, SaveHistoryResult } from "../core/history";
 import type { ChatMessage, SettingsStatus } from "../core/messaging";
 import { isRecord } from "../core/validate";
 import { DESKTOP_CALL_BINDING, DESKTOP_DELIVER_FN, type DesktopDelivery, type DesktopRequest } from "./desktop-protocol";
-import { readDraft, readSaveResult, readUiState } from "./replies";
+import { readConversation, readConversations, readDraft, readSaveResult, readUiState } from "./replies";
 import { ChatError, type SaveSettingsResult, type SettingsDraft, type SettingsInput, type Shell, type StreamChatOptions } from "./types";
 
 const NOT_CONNECTED = "Kibitz desktop companion is not connected";
@@ -141,6 +142,31 @@ async function openOptions(): Promise<void> {
   await send({ type: "open-options" });
 }
 
+async function listConversations(): Promise<ConversationSummary[]> {
+  return readConversations(await send({ type: "list-conversations" }), "companion");
+}
+
+async function loadConversation(id: string): Promise<ConversationRecord | null> {
+  return readConversation(await send({ type: "load-conversation", id }), "companion");
+}
+
+/**
+ * The companion answers a failed write rather than throwing, and that answer is passed
+ * straight through: a full disk is something the user fixes, not an exception the panel
+ * turns into a lost answer.
+ */
+async function saveConversation(record: ConversationRecord): Promise<SaveHistoryResult> {
+  return readSaveResult(await send({ type: "save-conversation", record }), "companion");
+}
+
+async function deleteConversation(id: string): Promise<void> {
+  await send({ type: "delete-conversation", id });
+}
+
+async function clearConversations(): Promise<void> {
+  await send({ type: "clear-conversations" });
+}
+
 export function createDesktopShell(): Shell {
   window[DESKTOP_DELIVER_FN] ??= deliver;
   return {
@@ -152,6 +178,11 @@ export function createDesktopShell(): Shell {
     openOptions,
     loadUiState,
     saveUiState,
+    listConversations,
+    loadConversation,
+    saveConversation,
+    deleteConversation,
+    clearConversations,
     // The renderer shares Discord's realm, so anything typed into the panel is reachable by
     // Discord's own JS; the settings view warns and points at the terminal wizard instead.
     capabilities: { keyIsPageVisible: true, canOpenOptionsPage: false },

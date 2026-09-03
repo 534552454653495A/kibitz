@@ -14,6 +14,7 @@
  * settings view shows a warning when it is true and keeps `kibitz-desktop setup` as the
  * safer route. Only the DRAFT (never a stored key) is ever sent back to the UI.
  */
+import type { ConversationRecord, ConversationSummary, SaveHistoryResult } from "../core/history";
 import type { ChatErrorCode, ChatMessage, SettingsStatus } from "../core/messaging";
 import type { ProviderId } from "../core/settings";
 
@@ -82,6 +83,25 @@ export interface Shell {
   loadUiState(): Promise<Record<string, unknown>>;
   saveUiState(state: Record<string, unknown>): Promise<void>;
   readonly capabilities: ShellCapabilities;
+  /**
+   * Saved conversations. Behind this seam because the two hosts store them differently
+   * (`chrome.storage.local` records vs files beside settings.json) and the panel must not
+   * know which — the same reason settings are here.
+   *
+   * `listConversations` returns summaries only: the list must stay cheap when a user has
+   * kept a thousand conversations, which they will, because retention is unlimited by the
+   * owner's decision (2026-09-03) and only their own delete removes anything.
+   */
+  listConversations(): Promise<ConversationSummary[]>;
+  loadConversation(id: string): Promise<ConversationRecord | null>;
+  /**
+   * Saves or replaces one record. Returns a failure instead of throwing because the one
+   * failure that matters is a full store, and the panel has to say so in words the user can
+   * act on ("delete some conversations") rather than losing the answer they just got.
+   */
+  saveConversation(record: ConversationRecord): Promise<SaveHistoryResult>;
+  deleteConversation(id: string): Promise<void>;
+  clearConversations(): Promise<void>;
   /** One sentence the settings view shows about where the key is stored. */
   readonly keyStorageHint: string;
 }

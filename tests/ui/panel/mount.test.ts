@@ -1,8 +1,13 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PlatformAdapter } from "../../../src/core/adapter";
-import type { PortRequest, PortResponse } from "../../../src/core/messaging";
+import { catalogueLine, summarise, type ConversationRecord } from "../../../src/core/history";
+import type { ChatMessage, PortRequest, PortResponse } from "../../../src/core/messaging";
+// The title one-shot is a chat request like every other one; its prompt is what tells them
+// apart, so the discriminator is taken from the prompt file instead of retyped here.
+import titleTemplate from "../../../src/core/prompts/title.md";
 import type { UniversalMessage, UniversalThread } from "../../../src/core/types";
+import { isRecord } from "../../../src/core/validate";
 import {
   ACTION_ATTR,
   PANEL_ERROR_ATTR,
@@ -37,12 +42,16 @@ const fakeRuntime = vi.hoisted(() => {
     granted: true,
     uiState: {} as Record<string, unknown>,
     savedUiStates: [] as Record<string, unknown>[],
+    /** The background's conversation store, keyed by id exactly like a real host's. */
+    conversations: [] as unknown[],
+    /** What `save-conversation` answers; a full store is the failure that matters. */
+    historySaveResult: { ok: true } as Record<string, unknown>,
     ports: [] as Array<{ sent: PortRequest[]; disconnected: boolean; emit: (msg: PortResponse) => void }>,
     sendMessage: vi.fn(),
   };
   const runtime = {
     lastError: undefined,
-    sendMessage: (req: { type: string; state?: Record<string, unknown> }) => {
+    sendMessage: (req: { type: string; state?: Record<string, unknown>; id?: string; record?: unknown }) => {
       state.sendMessage(req);
       switch (req.type) {
         case "settings-status":
@@ -57,6 +66,31 @@ const fakeRuntime = vi.hoisted(() => {
           return Promise.resolve({ state: state.uiState });
         case "save-ui-state":
           state.savedUiStates.push(req.state ?? {});
+          return Promise.resolve({ ok: true });
+        case "list-conversations":
+          // Summaries, through the core's own `summarise`: a hand-written summary here would
+          // test this stub's idea of the shape instead of the panel's.
+          return Promise.resolve({
+            conversations: state.conversations.map((record) => summarise(record as ConversationRecord)),
+          });
+        case "load-conversation":
+          return Promise.resolve({
+            conversation: state.conversations.find((entry) => (entry as ConversationRecord).id === req.id) ?? null,
+          });
+        case "save-conversation": {
+          if (state.historySaveResult.ok === true) {
+            const record = req.record as ConversationRecord;
+            const at = state.conversations.findIndex((entry) => (entry as ConversationRecord).id === record.id);
+            if (at === -1) state.conversations.push(record);
+            else state.conversations[at] = record;
+          }
+          return Promise.resolve(state.historySaveResult);
+        }
+        case "delete-conversation":
+          state.conversations = state.conversations.filter((entry) => (entry as ConversationRecord).id !== req.id);
+          return Promise.resolve({ ok: true });
+        case "clear-conversations":
+          state.conversations = [];
           return Promise.resolve({ ok: true });
         default:
           return Promise.resolve({ ok: true });
@@ -129,11 +163,55 @@ const composer = (): HTMLTextAreaElement => {
 };
 const untilState = (attr: string, value: string): Promise<void> =>
   vi.waitFor(() => expect(host().getAttribute(attr)).toBe(value));
+/**
+ * Kibitz opens a port per request, and one of them is not part of the conversation: after
+ * the first answer it asks the model for a 3-5 word title. The conversation's own requests
+ * are therefore indexed with that one filtered out, which is also what keeps these tests
+ * from depending on when the title request happens to be issued.
+ */
+const titleLine = titleTemplate.split("\n")[0] ?? "";
+const isTitleRequest = (port: FakePort): boolean => {
+  const request = port.sent[0];
+  return request?.type === "chat" && (request.messages[1]?.content ?? "").startsWith(titleLine);
+};
+const chatPorts = (): FakePort[] => fakeRuntime.ports.filter((port) => !isTitleRequest(port));
+const titlePorts = (): FakePort[] => fakeRuntime.ports.filter(isTitleRequest);
 const untilPort = (index: number): Promise<FakePort> =>
   vi.waitFor(() => {
-    const port = fakeRuntime.ports[index];
-    if (port === undefined) throw new Error(`port ${index} not opened yet`);
+    const port = chatPorts()[index];
+    if (port === undefined) throw new Error(`chat port ${index} not opened yet`);
     return port;
+  });
+const untilTitlePort = (): Promise<FakePort> =>
+  vi.waitFor(() => {
+    const port = titlePorts()[0];
+    if (port === undefined) throw new Error("no title request yet");
+    return port;
+  });
+/** What the panel asked the *conversation's* last request to answer. */
+const chatRequest = (port: FakePort): { requestId: string; messages: ChatMessage[] } => {
+  const request = port.sent[0];
+  if (request?.type !== "chat") throw new Error("expected a chat request");
+  return request;
+};
+const answerOn = (port: FakePort, text: string): void => {
+  const { requestId } = chatRequest(port);
+  port.emit({ type: "delta", requestId, text });
+  port.emit({ type: "done", requestId });
+};
+const stored = (): ConversationRecord[] => fakeRuntime.conversations as ConversationRecord[];
+const untilStored = (count: number): Promise<ConversationRecord[]> =>
+  vi.waitFor(() => {
+    expect(stored()).toHaveLength(count);
+    return stored();
+  });
+/** The ids every `save-conversation` named, in order: proof of one record per conversation. */
+const savedIds = (): string[] =>
+  fakeRuntime.sendMessage.mock.calls.flatMap((call: unknown[]) => {
+    const request = call[0];
+    if (!isRecord(request) || request.type !== "save-conversation") return [];
+    const record = request.record;
+    return isRecord(record) && typeof record.id === "string" ? [record.id] : [];
   });
 const untilAction = (name: string): Promise<HTMLElement> => vi.waitFor(() => action(name));
 
@@ -168,6 +246,8 @@ beforeEach(() => {
   fakeRuntime.saveResult = { ok: true };
   fakeRuntime.granted = true;
   fakeRuntime.uiState = {};
+  fakeRuntime.conversations = [];
+  fakeRuntime.historySaveResult = { ok: true };
   fakeRuntime.sendMessage.mockClear();
 });
 
@@ -412,9 +492,10 @@ describe("mountPanel same-author conversation", () => {
     await settleFirstAnswer("It says hi.");
 
     panel.open(ref);
-    // No second request: the answer is already on screen and re-asking would bill the user
-    // twice for it.
-    expect(fakeRuntime.ports).toHaveLength(1);
+    // No second request for the conversation: the answer is already on screen and re-asking
+    // would bill the user twice for it. (The title one-shot is Kibitz's own bookkeeping and
+    // may or may not have been issued by now, hence `chatPorts`.)
+    expect(chatPorts()).toHaveLength(1);
     expect(host().shadowRoot?.textContent).toContain("It says hi.");
     expect(cards()).toBe(1);
   });
@@ -558,5 +639,284 @@ describe("mountPanel layout persistence", () => {
       const saved = fakeRuntime.savedUiStates.at(-1)?.panelLayout;
       expect(saved).toMatchObject({ layout: { mode: "right" } });
     });
+  });
+});
+
+/**
+ * Failure modes defended, all three reported or decided by the owner (2026-09-03):
+ *   - a conversation the user can never get back. Saving on the answer, once per record, is
+ *     what makes the History tab useful; saving per click would fill it with empty entries.
+ *   - a store that is full and says nothing. Retention is unlimited, so the only way the
+ *     user learns they are out of room is Kibitz telling them, in the conversation.
+ *   - an answer lost to bookkeeping. Neither a failed save nor a failed title request may
+ *     take the answer off the screen or interrupt the conversation.
+ */
+describe("mountPanel conversation history", () => {
+  const second: UniversalMessage = { ...message, id: "m2", content: "and another thing" };
+  const byId = (...messages: UniversalMessage[]): PlatformAdapter =>
+    adapter({
+      readMessage: (r) => {
+        const found = messages.find((m) => m.id === r.messageId);
+        return found === undefined ? Promise.reject(new Error(`no fixture for ${r.messageId}`)) : Promise.resolve(found);
+      },
+    });
+
+  it("stores the answered conversation so its cards, transcript and model history round-trip", async () => {
+    const panel = mountPanel(adapter(), createExtensionShell());
+    panel.open(ref);
+    await settleFirstAnswer("It says hi.");
+
+    const [record] = await untilStored(1);
+    expect(record?.platform).toBe("discord");
+    expect(record?.channelId).toBe("c1");
+    expect(record?.messages.map((m) => m.id)).toEqual(["m1"]);
+    expect(record?.participants).toEqual([{ id: "u1", name: "Alice" }]);
+    // What the panel renders…
+    expect(record?.turns).toEqual([
+      { role: "message", message },
+      { role: "assistant", text: "It says hi." },
+    ]);
+    // …and what the model was given, which is a different list on purpose.
+    expect(record?.history.map((m) => m.role)).toEqual(["system", "user", "assistant"]);
+    expect(record?.history.at(-1)?.content).toBe("It says hi.");
+    // Until the model's title arrives the label is the message's own words.
+    expect(record?.title).toBe("Alice: hello there");
+  });
+
+  it("updates the same record when a second message and answer join the conversation", async () => {
+    const panel = mountPanel(byId(message, second), createExtensionShell());
+    panel.open(ref);
+    await settleFirstAnswer("It says hi.");
+    const [first] = await untilStored(1);
+
+    panel.open({ ...ref, messageId: "m2" });
+    answerOn(await untilPort(1), "Same subject.");
+
+    await vi.waitFor(() => {
+      const [record] = stored();
+      expect(record?.messages.map((m) => m.id)).toEqual(["m1", "m2"]);
+    });
+    const [record] = stored();
+    expect(stored()).toHaveLength(1);
+    expect(record?.id).toBe(first?.id);
+    expect(record?.createdAt).toBe(first?.createdAt);
+    // `updatedAt` moves with the conversation while `createdAt` does not.
+    expect((record?.updatedAt ?? "") >= (first?.updatedAt ?? "")).toBe(true);
+    // Every write named the one id, so nothing depended on the store de-duplicating for us.
+    expect(savedIds().length).toBeGreaterThan(1);
+    expect(savedIds().filter((id) => id !== first?.id)).toEqual([]);
+  });
+
+  it("saves nothing for a click whose answer never arrived", async () => {
+    const panel = mountPanel(adapter(), createExtensionShell());
+    panel.open(ref);
+    const port = await untilPort(0);
+    const { requestId } = chatRequest(port);
+
+    port.emit({ type: "error", requestId, code: "http", message: "502 from the provider" });
+    await vi.waitFor(() => expect(host().shadowRoot?.textContent).toContain("502 from the provider"));
+
+    // An abandoned or failed click is not history; an empty entry in the list would be worse
+    // than no entry, because the user has to open it to find out it says nothing.
+    expect(stored()).toEqual([]);
+    expect(savedIds()).toEqual([]);
+  });
+
+  it("says the conversation was not saved and keeps the answer when the store refuses", async () => {
+    fakeRuntime.historySaveResult = { ok: false, error: "Storage is full — delete some conversations." };
+    const panel = mountPanel(adapter(), createExtensionShell());
+    panel.open(ref);
+    await settleFirstAnswer("It says hi.");
+
+    await vi.waitFor(() => expect(host().shadowRoot?.textContent).toContain("Storage is full"));
+    expect(host().shadowRoot?.textContent).toContain("This conversation was not saved");
+    // The answer the user is reading survives the bookkeeping failure…
+    expect(host().shadowRoot?.textContent).toContain("It says hi.");
+    // …and the panel stays usable, rather than offering a Retry that would re-buy it.
+    expect(host().getAttribute(PANEL_STATE_ATTR)).toBe("ready");
+    await untilAction("send");
+  });
+
+  it("asks the model for a title once per conversation, outside the transcript", async () => {
+    const panel = mountPanel(byId(message, second), createExtensionShell());
+    panel.open(ref);
+    await settleFirstAnswer("It says hi.");
+
+    const title = await untilTitlePort();
+    const request = chatRequest(title);
+    // The title request needs both halves to name the subject, and is a one-shot: system
+    // prompt plus one user turn, never the conversation's history.
+    expect(request.messages.map((m) => m.role)).toEqual(["system", "user"]);
+    expect(request.messages[1]?.content).toContain("hello there");
+    expect(request.messages[1]?.content).toContain("It says hi.");
+    answerOn(title, "Alice's greeting explained");
+
+    await vi.waitFor(() => expect(stored()[0]?.title).toBe("Alice's greeting explained"));
+    // Neither the user nor the model ever sees it.
+    expect(host().shadowRoot?.textContent).not.toContain("Alice's greeting explained");
+    expect(stored()[0]?.history.map((m) => m.role)).toEqual(["system", "user", "assistant"]);
+
+    panel.open({ ...ref, messageId: "m2" });
+    answerOn(await untilPort(1), "Same subject.");
+    await vi.waitFor(() => expect(stored()[0]?.messages).toHaveLength(2));
+    // A second answer in the same conversation must not buy a second title.
+    expect(titlePorts()).toHaveLength(1);
+    expect(stored()[0]?.title).toBe("Alice's greeting explained");
+  });
+
+  it("keeps the fallback title, silently, when the title request fails", async () => {
+    const panel = mountPanel(adapter(), createExtensionShell());
+    panel.open(ref);
+    await settleFirstAnswer("It says hi.");
+
+    const title = await untilTitlePort();
+    const { requestId } = chatRequest(title);
+    title.emit({ type: "error", requestId, code: "http", message: "429 rate limited" });
+
+    await vi.waitFor(() => expect(stored()[0]?.title).toBe("Alice: hello there"));
+    // A nicer label is not worth an error the user has to read and cannot act on.
+    expect(host().shadowRoot?.textContent).not.toContain("429 rate limited");
+    expect(host().getAttribute(PANEL_ERROR_ATTR)).toBeNull();
+  });
+});
+
+describe("mountPanel history view", () => {
+  /** Two conversations already in the store, as a previous session left them. */
+  const older: UniversalMessage = {
+    ...message,
+    id: "m7",
+    channel: { id: "c7" },
+    author: { id: "u7", name: "yunus", isBot: false },
+    content: "yerel ai modelleri hakkında",
+  };
+  const record = (id: string, anchor: UniversalMessage, title: string, answer: string, updatedAt: string): ConversationRecord => ({
+    id,
+    platform: "discord",
+    channelId: anchor.channel.id,
+    title,
+    participants: [{ id: anchor.author.id, name: anchor.author.name }],
+    messages: [anchor],
+    turns: [
+      { role: "message", message: anchor },
+      { role: "assistant", text: answer },
+    ],
+    history: [
+      { role: "system", content: "system prompt" },
+      { role: "user", content: `explain ${anchor.content}` },
+      { role: "assistant", content: answer },
+    ],
+    createdAt: "2026-09-01T10:00:00.000Z",
+    updatedAt,
+  });
+  const AI = record("1756900000000-abc", older, "Yerel AI modelleri", "Llama'yı kendi makinende çalıştırmaktan bahsediyor.", "2026-09-03T09:00:00.000Z");
+  const ISO = record("1756800000000-def", { ...message, id: "m8", content: "spider man 2 iso" }, "Spider-Man 2 ISO", "Bir torrent bağlantısı.", "2026-09-02T09:00:00.000Z");
+
+  /**
+   * Opens the panel on a message and switches to the History tab with the list loaded. The
+   * opening answer is deliberately left unanswered: an answer would save a THIRD
+   * conversation (that is the feature) and these tests are about the two already stored.
+   */
+  async function openHistory(): Promise<void> {
+    const panel = mountPanel(adapter(), createExtensionShell());
+    panel.open(ref);
+    (await untilAction("view-history")).click();
+    await vi.waitFor(() => expect(host().getAttribute(VIEW_ATTR)).toBe("history"));
+  }
+
+  const search = (): HTMLInputElement => {
+    const el = host().shadowRoot?.querySelector<HTMLInputElement>(`[${ACTION_ATTR}="history-search"]`);
+    if (el === null || el === undefined) throw new Error("search box missing");
+    return el;
+  };
+  const typeQuery = (text: string): void => {
+    const box = search();
+    box.value = text;
+    box.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const rows = (): string[] => [...(host().shadowRoot?.querySelectorAll(".entry-title") ?? [])].map((el) => el.textContent ?? "");
+
+  it("lists what is stored, newest first, and filters it locally without a request", async () => {
+    fakeRuntime.conversations = [AI, ISO];
+    await openHistory();
+    await vi.waitFor(() => expect(rows()).toEqual(["Yerel AI modelleri", "Spider-Man 2 ISO"]));
+    const before = chatPorts().length;
+
+    typeQuery("spider");
+
+    await vi.waitFor(() => expect(rows()).toEqual(["Spider-Man 2 ISO"]));
+    // Typing is free: the filter is the core's own matcher over the summaries already here.
+    expect(chatPorts()).toHaveLength(before);
+  });
+
+  it("restores a stored conversation and sends the follow-up with the history it was given", async () => {
+    fakeRuntime.conversations = [AI];
+    await openHistory();
+    (await untilAction("history-open")).click();
+
+    await vi.waitFor(() => expect(host().getAttribute(VIEW_ATTR)).toBe("chat"));
+    // The card, the answer, and the anchor the conversation was left on.
+    await vi.waitFor(() => expect(host().shadowRoot?.textContent).toContain("yerel ai modelleri hakkında"));
+    expect(host().shadowRoot?.textContent).toContain("Llama'yı kendi makinende çalıştırmaktan bahsediyor.");
+    expect(host().getAttribute(PANEL_MESSAGE_ATTR)).toBe("m7");
+
+    pressEnter(type("peki hangi model?"));
+
+    const follow = chatRequest(await untilPort(1));
+    // The model gets the conversation it had before, not a cold start: that is the whole
+    // reason the record stores `history` next to the display turns.
+    expect(follow.messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "user"]);
+    expect(follow.messages[2]?.content).toBe("Llama'yı kendi makinende çalıştırmaktan bahsediyor.");
+    expect(follow.messages.at(-1)?.content).toBe("peki hangi model?");
+  });
+
+  it("sends one catalogue request for the AI search and opens the conversation it names", async () => {
+    fakeRuntime.conversations = [AI, ISO];
+    await openHistory();
+    await vi.waitFor(() => expect(rows()).toHaveLength(2));
+
+    // The owner's own question: prose, matching no stored word literally.
+    typeQuery("yunusun ai ile ilgili konusu vardı, bulabilir misin?");
+    (await untilAction("history-ask")).click();
+
+    const find = chatRequest(await untilPort(1));
+    expect(find.messages.map((m) => m.role)).toEqual(["system", "user"]);
+    const sent = find.messages[1]?.content ?? "";
+    // One line per conversation, from the core's own formatter, plus the question itself.
+    expect(sent).toContain(catalogueLine(summarise(AI)));
+    expect(sent).toContain(catalogueLine(summarise(ISO)));
+    expect(sent).toContain("yunusun ai ile ilgili konusu vardı, bulabilir misin?");
+    expect(chatPorts()).toHaveLength(2);
+
+    answerOn(await untilPort(1), `Yunus ile 3 Eylül'de.\n\nMATCHES: ${AI.id}`);
+
+    (await untilAction("history-match")).click();
+    await vi.waitFor(() => expect(host().getAttribute(PANEL_MESSAGE_ATTR)).toBe("m7"));
+    expect(host().getAttribute(VIEW_ATTR)).toBe("chat");
+  });
+
+  it("deletes one conversation from the store and takes its row away", async () => {
+    fakeRuntime.conversations = [AI, ISO];
+    await openHistory();
+    await vi.waitFor(() => expect(rows()).toHaveLength(2));
+
+    (await untilAction("history-delete")).click();
+
+    await vi.waitFor(() => expect(rows()).toEqual(["Spider-Man 2 ISO"]));
+    expect(stored().map((entry) => entry.id)).toEqual([ISO.id]);
+  });
+
+  it("deletes everything only after the confirmation step", async () => {
+    fakeRuntime.conversations = [AI, ISO];
+    await openHistory();
+    await vi.waitFor(() => expect(rows()).toHaveLength(2));
+
+    (await untilAction("history-clear")).click();
+    // Armed, not fired: retention is unlimited, so this is the one irreversible button.
+    expect(stored()).toHaveLength(2);
+
+    (await untilAction("history-clear-confirm")).click();
+
+    await vi.waitFor(() => expect(stored()).toEqual([]));
+    await vi.waitFor(() => expect(host().shadowRoot?.textContent).toContain("Ask about a message"));
   });
 });

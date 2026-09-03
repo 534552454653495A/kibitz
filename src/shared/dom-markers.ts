@@ -44,6 +44,21 @@ export type ActionName =
   /** Header tabs (one per registered view) and the back arrow. */
   | "view-chat"
   | "view-settings"
+  | "view-history"
+  /**
+   * History view. `history-open` is a list row, `history-match` a conversation the AI search
+   * named: two names because a test (and the probe) has to be able to tell which of the two
+   * routes into a stored conversation the user took.
+   */
+  | "history-search"
+  | "history-ask"
+  | "history-open"
+  | "history-match"
+  | "history-delete"
+  /** Deleting everything is armed, then confirmed or cancelled — three distinct buttons. */
+  | "history-clear"
+  | "history-clear-confirm"
+  | "history-clear-cancel"
   /** Settings view. */
   | "save-settings"
   | "test-settings"

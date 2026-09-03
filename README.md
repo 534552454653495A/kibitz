@@ -143,6 +143,28 @@ of the two you are in.
    edge to re-dock), drag the grip to resize. Your layout is remembered per host.
 6. `Esc` or ✕ closes the panel.
 
+### History
+
+Every conversation that got an answer is saved on this machine, and the **History** tab in the
+panel header lists them newest first — with a 3-5 word title the model writes once per
+conversation, the people in it and when it happened. Click one to reopen it: the cards, the
+answers and the model's own memory of it come back, so you can keep asking where you left off.
+Delete one, or delete all behind a confirm step.
+
+Nothing is pruned. Retention is unlimited until you delete something, which is why the
+extension asks for `unlimitedStorage` — it lifts Chrome's 10 MB quota and grants no access the
+extension did not already have. Where it lives: extension → `chrome.storage.local` (never
+synced); desktop → `history/` beside `settings.json`, one file per conversation, `0600` like the
+settings file, because a transcript of your DMs deserves the same care as a key.
+
+The one box above the list does two things. Typing filters instantly and locally — nothing
+leaves the machine. **Ask** hands the same box's text to your model as a question, together
+with a **one line per conversation** catalogue: id, date, the people, the title, and the first
+message's opening words. That is how "hangi sohbette videodan bahsetmiştik?" finds a
+conversation whose words you no longer remember. The panel shows the exact lines it will send
+and how many, because that is your own data leaving; the answers and the rest of the messages
+never do. One request per question, by design.
+
 ### Images
 
 When the message you asked about has an image attached, Kibitz sends the picture to the API

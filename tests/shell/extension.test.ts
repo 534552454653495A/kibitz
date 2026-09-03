@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ConversationRecord, ConversationSummary } from "../../src/core/history";
 import type { ChatMessage, PortRequest, PortResponse } from "../../src/core/messaging";
+import type { UniversalMessage } from "../../src/core/types";
 import { createExtensionShell } from "../../src/shell/extension";
 import { ChatError } from "../../src/shell/types";
 
@@ -269,5 +271,104 @@ describe("extension shell one-shot requests", () => {
     fakeRuntime.reply["save-ui-state"] = { ok: true };
     await createExtensionShell().saveUiState({ panelLayout: { mode: "float", x: 10 } });
     expect(fakeRuntime.sent).toContainEqual({ type: "save-ui-state", state: { panelLayout: { mode: "float", x: 10 } } });
+  });
+});
+
+describe("extension shell history requests", () => {
+  const message: UniversalMessage = {
+    platform: "discord",
+    id: "1000000000000000001",
+    channel: { id: "c1" },
+    author: { id: "u-yunus", name: "Yunus", isBot: false },
+    content: "AI konusunu tartışalım",
+    createdAt: "2026-09-01T10:00:00.000Z",
+    attachments: [],
+    embeds: [],
+    reactions: [],
+    mentions: [],
+    isSystem: false,
+  };
+  const summary: ConversationSummary = {
+    id: "c-1",
+    platform: "discord",
+    channelId: "c1",
+    title: "Yunus on AI",
+    participants: [{ id: "u-yunus", name: "Yunus" }],
+    messageCount: 1,
+    excerpt: "AI konusunu tartışalım",
+    createdAt: "2026-09-01T10:00:00.000Z",
+    updatedAt: "2026-09-01T10:05:00.000Z",
+  };
+  const record: ConversationRecord = {
+    id: summary.id,
+    platform: summary.platform,
+    channelId: summary.channelId,
+    title: summary.title,
+    participants: summary.participants,
+    messages: [message],
+    turns: [{ role: "message", message }],
+    history: [{ role: "user", content: "explain" }],
+    createdAt: summary.createdAt,
+    updatedAt: summary.updatedAt,
+  };
+
+  it("asks the background for summaries and passes them through unchanged", async () => {
+    fakeRuntime.reply["list-conversations"] = { conversations: [summary] };
+    await expect(createExtensionShell().listConversations()).resolves.toEqual([summary]);
+    expect(fakeRuntime.sent).toContainEqual({ type: "list-conversations" });
+  });
+
+  // One entry written by an older build must not blank the whole history list.
+  it("drops an unreadable summary and still returns the rest of the list", async () => {
+    fakeRuntime.reply["list-conversations"] = { conversations: [{ id: "broken" }, summary] };
+    await expect(createExtensionShell().listConversations()).resolves.toEqual([summary]);
+  });
+
+  it("throws when the reply carries no list at all, rather than showing an empty history", async () => {
+    fakeRuntime.reply["list-conversations"] = { ok: true };
+    await expect(createExtensionShell().listConversations()).rejects.toThrow(/malformed conversation list/);
+  });
+
+  it("loads one conversation by id and reads a missing one as null, not an error", async () => {
+    fakeRuntime.reply["load-conversation"] = { conversation: record };
+    await expect(createExtensionShell().loadConversation("c-1")).resolves.toMatchObject({ id: "c-1", turns: [{ role: "message" }] });
+    expect(fakeRuntime.sent).toContainEqual({ type: "load-conversation", id: "c-1" });
+
+    fakeRuntime.reply["load-conversation"] = { conversation: null };
+    await expect(createExtensionShell().loadConversation("gone")).resolves.toBeNull();
+  });
+
+  it("throws when a conversation comes back unreadable instead of rendering a blank transcript", async () => {
+    fakeRuntime.reply["load-conversation"] = { conversation: { id: "c-1", messages: "not a list" } };
+    await expect(createExtensionShell().loadConversation("c-1")).rejects.toThrow(/malformed conversation/);
+  });
+
+  it("sends the record for saving and reports a full store in the background's own words", async () => {
+    fakeRuntime.reply["save-conversation"] = { ok: true };
+    await expect(createExtensionShell().saveConversation(record)).resolves.toEqual({ ok: true });
+    expect(fakeRuntime.sent).toContainEqual({ type: "save-conversation", record });
+
+    fakeRuntime.reply["save-conversation"] = { ok: false, error: "Kibitz could not save this conversation: full. Delete some conversations." };
+    await expect(createExtensionShell().saveConversation(record)).resolves.toEqual({
+      ok: false,
+      error: "Kibitz could not save this conversation: full. Delete some conversations.",
+    });
+  });
+
+  it("throws when a save reply says neither yes nor why not", async () => {
+    fakeRuntime.reply["save-conversation"] = { saved: "maybe" };
+    await expect(createExtensionShell().saveConversation(record)).rejects.toThrow(/malformed save result/);
+  });
+
+  it("sends delete and clear as one message each", async () => {
+    fakeRuntime.reply["delete-conversation"] = { ok: true };
+    fakeRuntime.reply["clear-conversations"] = { ok: true };
+    const shell = createExtensionShell();
+
+    await shell.deleteConversation("c-1");
+    await shell.clearConversations();
+
+    expect(fakeRuntime.sent).toContainEqual({ type: "delete-conversation", id: "c-1" });
+    expect(fakeRuntime.sent).toContainEqual({ type: "clear-conversations" });
   });
 });

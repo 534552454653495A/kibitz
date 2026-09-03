@@ -13,11 +13,11 @@
  *     Discord from stealing them.
  */
 import { useEffect, useRef } from "preact/hooks";
+import type { Turn } from "../../../core/history";
 import type { UniversalMessage } from "../../../core/types";
 import { ACTION_ATTR } from "../../../shared/dom-markers";
 import type { PanelActions } from "../actions";
 import { renderMarkdown } from "../markdown";
-import type { Turn } from "../state";
 import type { PanelContext, PanelView } from "../views";
 
 /** Auto-grow ceiling: past this the composer eats the conversation it is answering. */
@@ -29,8 +29,13 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
-/** Coarse buckets on purpose: a chat message's age is context, not a measurement. */
-function relativeTime(iso: string, now: number): string {
+/**
+ * Coarse buckets on purpose: a message's age is context, not a measurement.
+ *
+ * Exported because the history list dates its entries the same way; a second implementation
+ * there would eventually disagree with this one about what "1h ago" means.
+ */
+export function relativeTime(iso: string, now: number): string {
   const age = now - Date.parse(iso);
   if (!Number.isFinite(age) || age < MINUTE) return "just now";
   if (age < HOUR) return `${Math.floor(age / MINUTE)}m ago`;

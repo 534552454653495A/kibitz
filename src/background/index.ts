@@ -14,6 +14,7 @@
  * answers `{granted:false}` at once. The panel then tells the user to finish there and save
  * again; pretending to have granted would strand the next request on a silent failure.
  */
+import { parseConversation } from "../core/history";
 import {
   CHAT_PORT_NAME,
   type RuntimeRequest,
@@ -25,6 +26,13 @@ import { ext } from "../shared/ext";
 import { log } from "../shared/log";
 import { loadSettings } from "../shared/settings";
 import { attachChatPort } from "./chat-session";
+import {
+  clearConversations,
+  deleteConversation,
+  listConversations,
+  loadConversation,
+  saveConversation,
+} from "./history-service";
 import { loadDraft, loadUiState, saveDraft, saveUiState } from "./settings-service";
 
 /** Big enough for the sentence and the button, small enough to read as a prompt, not a page. */
@@ -53,6 +61,18 @@ function parseRequest(message: unknown): RuntimeRequest | null {
     case "load-settings":
     case "load-ui-state":
       return { type: message.type };
+    case "list-conversations":
+    case "clear-conversations":
+      return { type: message.type };
+    case "load-conversation":
+    case "delete-conversation":
+      return typeof message.id === "string" && message.id.length > 0 ? { type: message.type, id: message.id } : null;
+    case "save-conversation": {
+      // The record arrives from a page-side listener anyone can reach, so it is validated
+      // with the same parser storage uses rather than trusted because the panel sent it.
+      const record = parseConversation(message.record);
+      return record === null ? null : { type: "save-conversation", record };
+    }
     case "save-settings": {
       const input = parseInput(message.input);
       return input === null ? null : { type: "save-settings", input };
@@ -93,6 +113,18 @@ async function dispatch(request: RuntimeRequest): Promise<RuntimeResponse> {
       return { state: await loadUiState() };
     case "save-ui-state":
       await saveUiState(request.state);
+      return { ok: true };
+    case "list-conversations":
+      return { conversations: await listConversations() };
+    case "load-conversation":
+      return { conversation: await loadConversation(request.id) };
+    case "save-conversation":
+      return await saveConversation(request.record);
+    case "delete-conversation":
+      await deleteConversation(request.id);
+      return { ok: true };
+    case "clear-conversations":
+      await clearConversations();
       return { ok: true };
     case "open-options":
       await ext.runtime.openOptionsPage();

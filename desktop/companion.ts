@@ -16,6 +16,14 @@ import * as fs from "node:fs/promises";
 import puppeteer, { type Browser, type Page, type Target } from "puppeteer-core";
 import { log } from "../src/shared/log";
 import { isDiscordUrl } from "./cdp";
+import {
+  clearConversations,
+  deleteConversation,
+  historyDir,
+  listConversations,
+  loadConversation,
+  saveConversation,
+} from "./history-store";
 import { attachKibitz, deliver, replaceBundle } from "./inject";
 import { createDesktopRequestHandler } from "./request-handler";
 import { loadFileSettings, saveFileSettings, settingsPath } from "./settings-store";
@@ -89,6 +97,9 @@ export async function runCompanion(opts: CompanionOptions): Promise<void> {
   // Preferences live beside whichever settings file is in play, so an overridden
   // `settingsPath` (tests, a second profile) keeps both halves of the state together.
   const uiState = uiStatePath(file);
+  // Saved conversations follow the same file, in a directory of their own: dropping the
+  // history must never be able to reach settings.json or ui-state.json beside it.
+  const history = historyDir(file);
   const browser = await puppeteer.connect({ browserURL: `http://127.0.0.1:${opts.port}`, defaultViewport: null });
   log.warn(SECURITY_NOTE);
 
@@ -105,6 +116,11 @@ export async function runCompanion(opts: CompanionOptions): Promise<void> {
       saveSettings: (settings) => saveFileSettings(settings, file),
       loadUiState: () => loadUiState(uiState),
       saveUiState: (state) => saveUiState(state, uiState),
+      listConversations: () => listConversations(history),
+      loadConversation: (id) => loadConversation(id, history),
+      saveConversation: (record) => saveConversation(record, history),
+      deleteConversation: (id) => deleteConversation(id, history),
+      clearConversations: () => clearConversations(history),
       deliver: (json) => deliver(page, json),
       openOptions: () => console.log(setupInstructions(file)),
     });

@@ -28,6 +28,12 @@ function stubActions(): PanelActions {
     toggleExpanded: vi.fn(),
     resetLayout: vi.fn(),
     copyTurn: vi.fn(),
+    searchConversations: vi.fn(),
+    askConversations: vi.fn(),
+    openConversation: vi.fn(),
+    deleteConversation: vi.fn(),
+    confirmClearConversations: vi.fn(),
+    clearConversations: vi.fn(),
   };
 }
 

@@ -28,6 +28,7 @@ import puppeteer, { type Browser, type Page } from "puppeteer";
 import { attachKibitz, deliver } from "../desktop/inject";
 import { createDesktopRequestHandler } from "../desktop/request-handler";
 import { HOSTS, parseChannelPath } from "../src/adapters/discord/selectors";
+import { byRecency, type ConversationRecord, summarise } from "../src/core/history";
 import { LOG_PREFIX } from "../src/shared/log";
 import { CHECKS, ProbeSessionError, type ProbeContext } from "./checks";
 import { installDiscordToken } from "./discord-session";
@@ -170,6 +171,9 @@ async function serveFixture(page: Page, url: string, fixturePath: string): Promi
 async function attachDesktopBundle(page: Page, distDir: string): Promise<void> {
   const bundle = await fs.readFile(path.join(distDir, DESKTOP_BUNDLE), "utf8");
   let uiState: Record<string, unknown> = {};
+  // Same reason as `uiState`: in-memory, so a probe run never writes into the developer's
+  // real history directory, and the panel still gets a working list to render.
+  const conversations = new Map<string, ConversationRecord>();
   const handler = createDesktopRequestHandler({
     loadSettings: async () => null,
     saveSettings: async () => {},
@@ -177,6 +181,16 @@ async function attachDesktopBundle(page: Page, distDir: string): Promise<void> {
     saveUiState: async (state) => {
       uiState = state;
     },
+    listConversations: async () => [...conversations.values()].map((record) => summarise(record)).sort(byRecency),
+    loadConversation: async (id) => conversations.get(id) ?? null,
+    saveConversation: async (record) => {
+      conversations.set(record.id, record);
+      return { ok: true };
+    },
+    deleteConversation: async (id) => {
+      conversations.delete(id);
+    },
+    clearConversations: async () => conversations.clear(),
     deliver: (json) => deliver(page, json),
     openOptions: () => {},
   });

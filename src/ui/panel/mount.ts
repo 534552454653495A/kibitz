@@ -14,11 +14,38 @@
  *
  * Geometry is delegated to layout.ts and only *persisted* here, because saving is a shell
  * concern (`loadUiState`/`saveUiState`) and the layout engine must stay DOM-pure.
+ *
+ * Conversation history is written here for the same reason: the shell stores records, but
+ * only the controller knows when a conversation is worth storing. Two rules decide that:
+ *   - a save happens when an ANSWER completes and when a message joins a conversation that
+ *     already has one. A click whose answer never arrived is not history, and minting a
+ *     record for it would leave an empty entry in the list for every mis-click;
+ *   - the id and `createdAt` are minted once, on the first save, and kept in the model, so
+ *     every later save REPLACES that record instead of growing the list as the user asks.
  */
 import { h, render } from "preact";
 import type { PlatformAdapter } from "../../core/adapter";
+import {
+  catalogueLine,
+  clip,
+  fallbackTitle,
+  isTextTurn,
+  matchesQuery,
+  newConversationId,
+  participantsOf,
+  summarySearchText,
+  type ConversationRecord,
+  type SaveHistoryResult,
+} from "../../core/history";
 import type { ChatMessage } from "../../core/messaging";
-import { appendExplain, appendFollowUp, buildExplainMessages, buildSynthesisMessages } from "../../core/prompt";
+import {
+  appendExplain,
+  appendFollowUp,
+  buildExplainMessages,
+  buildFindMessages,
+  buildSynthesisMessages,
+  buildTitleMessages,
+} from "../../core/prompt";
 import { originPattern } from "../../core/settings";
 import type { MessageRef, UniversalMessage } from "../../core/types";
 import {
@@ -39,7 +66,7 @@ import type { PanelActions } from "./actions";
 import { clampLayout, installLayoutController, parseLayoutState, UI_STATE_LAYOUT_KEY } from "./layout";
 import { DEFAULT_LAYOUT_STATE, type LayoutState, type Viewport } from "./layout-model";
 import panelCss from "./panel.css";
-import { admitsMessage, conversationMessages, INITIAL, isTextTurn, reduce, type PanelAction, type PanelModel } from "./state";
+import { admitsMessage, conversationMessages, INITIAL, reduce, type PanelAction, type PanelModel } from "./state";
 
 export interface PanelHandle {
   open(ref: MessageRef): void;
@@ -70,6 +97,21 @@ const PROBE_REPLY_MAX = 80;
 
 function describeError(err: unknown): string {
   return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+}
+
+/**
+ * The text of the last answer, or "" when the conversation has none yet.
+ *
+ * This is the test for "is this worth saving": an assistant turn with text means the user
+ * got something back. An empty one is a stream that is still waiting, and a conversation
+ * with no answer at all is a click the user abandoned.
+ */
+function lastAnswer(model: PanelModel): string {
+  for (let index = model.turns.length - 1; index >= 0; index -= 1) {
+    const turn = model.turns[index];
+    if (turn?.role === "assistant" && turn.text.length > 0) return turn.text;
+  }
+  return "";
 }
 
 /**
@@ -131,6 +173,13 @@ export function mountPanel(adapter: PlatformAdapter, shell: Shell): PanelHandle 
   let streamAbort: AbortController | null = null;
   let scanAbort: AbortController | null = null;
   let testAbort: AbortController | null = null;
+  /** The title one-shot and the AI search: separate from the answer stream on purpose. */
+  let titleAbort: AbortController | null = null;
+  let findAbort: AbortController | null = null;
+  /** Serialises the writes of one record; see `queueSave`. */
+  let saveChain: Promise<void> = Promise.resolve();
+  /** Latest list request wins; see `listFlow` for why `session` is the wrong guard here. */
+  let listToken = 0;
   let persistTimer: number | undefined = undefined;
 
   function viewport(): Viewport {
@@ -190,6 +239,16 @@ export function mountPanel(adapter: PlatformAdapter, shell: Shell): PanelHandle 
     persistLayout(clamped);
   }
 
+  /**
+   * An answer is complete: the conversation has something in it worth keeping, so this is
+   * the one moment a record is written (and, the first time, titled). A stopped answer is
+   * still an answer, so an abort ends up here too.
+   */
+  function endStream(owner: number): void {
+    dispatch({ type: "stream-end" });
+    void recordAnswer(owner);
+  }
+
   async function stream(history: ChatMessage[], owner: number): Promise<void> {
     stopStream();
     const abort = new AbortController();
@@ -202,12 +261,12 @@ export function mountPanel(adapter: PlatformAdapter, shell: Shell): PanelHandle 
           if (owner === session) dispatch({ type: "delta", text });
         },
       });
-      if (owner === session) dispatch({ type: "stream-end" });
+      if (owner === session) endStream(owner);
     } catch (err) {
       if (owner !== session) return;
       if (err instanceof ChatError && err.code === "aborted") {
         // A stopped answer is still an answer: keep what arrived as the assistant turn.
-        dispatch({ type: "stream-end" });
+        endStream(owner);
         return;
       }
       log.warn("chat failed", err);
@@ -287,6 +346,9 @@ export function mountPanel(adapter: PlatformAdapter, shell: Shell): PanelHandle 
     }
     const history = appendExplain(model.history, message);
     dispatch({ type: "continue", ref, message });
+    // The card is part of the conversation now, so the stored record has to contain it even
+    // if the answer for it never arrives (provider down, key expired, user closes Discord).
+    void queueSave(owner);
     await finishExplain(history, settings, owner);
   }
 
@@ -318,6 +380,245 @@ export function mountPanel(adapter: PlatformAdapter, shell: Shell): PanelHandle 
     } finally {
       if (scanAbort === abort) scanAbort = null;
     }
+  }
+
+  /**
+   * Writes the conversation on screen into the store, minting its identity on the first
+   * call so that every later write REPLACES the same record.
+   *
+   * Reads `model` when it runs rather than when it was queued, which is what makes
+   * serialising the writes (see `queueSave`) safe: a save that waited stores the newest
+   * transcript, never an older snapshot of the same conversation.
+   */
+  async function saveNow(owner: number): Promise<void> {
+    const messages = conversationMessages(model.turns);
+    const first = messages[0];
+    // No answer yet means an abandoned click: an empty record in the list is worse than no
+    // record, because the user has to open it to find out it says nothing.
+    if (first === undefined || lastAnswer(model) === "") return;
+    let identity = model.conversation;
+    if (identity === null) {
+      identity = { id: newConversationId(), createdAt: new Date().toISOString(), title: null, titleAsked: false };
+      dispatch({ type: "conversation-recorded", id: identity.id, createdAt: identity.createdAt });
+    }
+    const record: ConversationRecord = {
+      id: identity.id,
+      // From the message itself, not from the panel's platform: the record is what a list
+      // and a search read months later, and the card knows where it came from.
+      platform: first.platform,
+      channelId: first.channel.id,
+      title: identity.title ?? fallbackTitle(messages),
+      participants: participantsOf(messages),
+      messages,
+      turns: model.turns,
+      history: model.history,
+      createdAt: identity.createdAt,
+      updatedAt: new Date().toISOString(),
+    };
+    let result: SaveHistoryResult;
+    try {
+      result = await shell.saveConversation(record);
+    } catch (err) {
+      log.warn("saveConversation failed", err);
+      result = { ok: false, error: describeError(err) };
+    }
+    if (owner !== session) return;
+    if (!result.ok) {
+      // A note, not an error turn: the answer is on screen and intact, and there is nothing
+      // to retry — a full store needs the user to delete something. An error turn would
+      // offer the Retry button, i.e. pay for an answer they are already reading.
+      dispatch({ type: "note", text: `This conversation was not saved: ${result.error}` });
+      return;
+    }
+    // Only when the list has already been looked at: the first visit to the History tab
+    // fetches it itself, and a user who never opened the tab should not pay for the read.
+    if (model.saved.list !== null) await listFlow();
+  }
+
+  /**
+   * Saves are serialised. Two overlapping writes of one record (a message appended while an
+   * answer is finishing) can otherwise complete out of order and leave the older transcript
+   * in the store.
+   */
+  function queueSave(owner: number): Promise<void> {
+    saveChain = saveChain.then(() => saveNow(owner)).catch((err: unknown) => {
+      // One rejection would poison the chain and silently stop every later save, so the
+      // failure ends here and the next conversation starts from a resolved promise.
+      log.warn("save flow failed", err);
+    });
+    return saveChain;
+  }
+
+  /**
+   * One extra request per conversation for a 3-5 word label, made once the first answer is
+   * complete (the model needs the answer to name the subject).
+   *
+   * Deliberately not part of the conversation: it is neither added to the transcript nor to
+   * `model.history`, so the user never reads it and the follow-ups never re-send it.
+   *
+   * Every failure is swallowed after a log line. The list already has `fallbackTitle`, and a
+   * nicer label is not worth an error the user has to read and cannot act on.
+   */
+  async function titleFlow(first: UniversalMessage, answer: string, owner: number): Promise<void> {
+    dispatch({ type: "conversation-title-requested" });
+    titleAbort?.abort();
+    const abort = new AbortController();
+    titleAbort = abort;
+    let text = "";
+    try {
+      await shell.streamChat(buildTitleMessages(first, answer), {
+        signal: abort.signal,
+        onDelta: (delta) => {
+          text += delta;
+        },
+      });
+    } catch (err) {
+      log.warn("title request failed", err);
+      return;
+    } finally {
+      if (titleAbort === abort) titleAbort = null;
+    }
+    if (owner !== session) return;
+    // First line only: a model that adds "Here is your title:" gets its second line dropped
+    // rather than pasted into the list.
+    const title = clip((text.trim().split("\n")[0] ?? "").trim());
+    if (title === "") return;
+    dispatch({ type: "conversation-titled", title });
+    await queueSave(owner);
+  }
+
+  /** Save, then title if this conversation has never asked for one. */
+  async function recordAnswer(owner: number): Promise<void> {
+    const answer = lastAnswer(model);
+    const first = conversationMessages(model.turns)[0];
+    if (answer === "" || first === undefined) return;
+    const untitled = model.conversation === null || !model.conversation.titleAsked;
+    await queueSave(owner);
+    if (owner !== session || !untitled) return;
+    // A save that failed left no record, so there is nothing to title either.
+    if (model.conversation === null) return;
+    await titleFlow(first, answer, owner);
+  }
+
+  /**
+   * Refreshes the list. Guarded by its own token rather than by `session`, because the saved
+   * conversations are not about the message that is open: closing the panel must not throw
+   * away a list that is on its way, and two overlapping reads must not land backwards.
+   */
+  async function listFlow(): Promise<void> {
+    const token = ++listToken;
+    dispatch({ type: "history-busy", busy: true });
+    try {
+      const list = await shell.listConversations();
+      if (token === listToken) dispatch({ type: "history-listed", list });
+    } catch (err) {
+      log.warn("listConversations failed", err);
+      if (token === listToken) {
+        dispatch({ type: "history-list-failed", error: `Could not read your saved conversations: ${describeError(err)}` });
+      }
+    }
+  }
+
+  /**
+   * Puts a stored conversation back on screen. The session is bumped first: a stream still
+   * arriving for the message the panel was showing must not append itself to the transcript
+   * the user just restored.
+   */
+  async function openConversationFlow(id: string): Promise<void> {
+    session += 1;
+    stopStream();
+    stopScan();
+    const owner = session;
+    dispatch({ type: "history-busy", busy: true });
+    let record: ConversationRecord | null;
+    try {
+      record = await shell.loadConversation(id);
+    } catch (err) {
+      log.warn("loadConversation failed", err);
+      dispatch({ type: "history-list-failed", error: `Could not open that conversation: ${describeError(err)}` });
+      return;
+    }
+    if (owner !== session) return;
+    if (record === null) {
+      // Unknown or unreadable id: the record is gone or was written by something that is not
+      // us. The row is dropped from the list rather than left as a button that does nothing.
+      dispatch({ type: "history-deleted", id });
+      dispatch({ type: "history-list-failed", error: "That conversation could not be read, so it is no longer listed." });
+      return;
+    }
+    dispatch({ type: "history-restore", record });
+    // The composer only appears once Kibitz is known to be configured, and the panel may
+    // have been opened on a message whose settings check has not happened (or failed).
+    if (model.configured !== true) {
+      const configured = await settingsPromise();
+      if (owner === session) dispatch({ type: "settings", configured });
+    }
+  }
+
+  /**
+   * The AI search: ONE request over a one-line-per-conversation catalogue (owner's decision,
+   * 2026-09-03 — no second pass, no embeddings).
+   *
+   * The local filter narrows the catalogue only when it found something: a question asked in
+   * prose ("Yunus'un AI ile ilgili konusu vardı, geçmişten bulabilir misin?") matches no line
+   * literally, and sending an empty catalogue would spend a request on nothing. The history
+   * view computes the same set for the sentence that says what is about to be sent.
+   */
+  async function findFlow(question: string, owner: number): Promise<void> {
+    const list = model.saved.list ?? [];
+    const filtered = list.filter((summary) => matchesQuery(summarySearchText(summary), question));
+    const chosen = filtered.length > 0 ? filtered : list;
+    if (chosen.length === 0) {
+      dispatch({ type: "history-list-failed", error: "Nothing is saved yet, so there is nothing to look through." });
+      return;
+    }
+    findAbort?.abort();
+    const abort = new AbortController();
+    findAbort = abort;
+    dispatch({ type: "history-find-start" });
+    try {
+      await shell.streamChat(buildFindMessages(chosen.map(catalogueLine).join("\n"), question), {
+        signal: abort.signal,
+        onDelta: (text) => {
+          if (owner === session) dispatch({ type: "history-find-delta", text });
+        },
+      });
+      if (owner === session) dispatch({ type: "history-find-end" });
+    } catch (err) {
+      if (owner !== session) return;
+      log.warn("history search failed", err);
+      // An aborted search still shows what arrived, exactly like a stopped answer.
+      if (err instanceof ChatError && err.code === "aborted") dispatch({ type: "history-find-end" });
+      else dispatch({ type: "history-find-failed", error: `The search failed: ${describeError(err)}` });
+    } finally {
+      if (findAbort === abort) findAbort = null;
+    }
+  }
+
+  /**
+   * Removed from the list first so the click feels immediate, then re-listed from the store
+   * so a delete that failed cannot leave the UI claiming something is gone.
+   */
+  async function deleteFlow(id: string): Promise<void> {
+    dispatch({ type: "history-deleted", id });
+    try {
+      await shell.deleteConversation(id);
+    } catch (err) {
+      log.warn("deleteConversation failed", err);
+      dispatch({ type: "history-list-failed", error: `Could not delete that conversation: ${describeError(err)}` });
+    }
+    await listFlow();
+  }
+
+  async function clearFlow(): Promise<void> {
+    dispatch({ type: "history-cleared" });
+    try {
+      await shell.clearConversations();
+    } catch (err) {
+      log.warn("clearConversations failed", err);
+      dispatch({ type: "history-list-failed", error: `Could not delete your conversations: ${describeError(err)}` });
+    }
+    await listFlow();
   }
 
   async function loadDraft(): Promise<void> {
@@ -398,6 +699,11 @@ export function mountPanel(adapter: PlatformAdapter, shell: Shell): PanelHandle 
       stopScan();
       testAbort?.abort();
       testAbort = null;
+      // The title one-shot and the AI search are billed requests for a panel that is gone.
+      titleAbort?.abort();
+      titleAbort = null;
+      findAbort?.abort();
+      findAbort = null;
       dispatch({ type: "close" });
     },
     send(text) {
@@ -427,6 +733,9 @@ export function mountPanel(adapter: PlatformAdapter, shell: Shell): PanelHandle 
     showView(id) {
       dispatch({ type: "show-view", id });
       if (id === "settings" && model.settings.draft === null) void loadDraft();
+      // Only on the first visit: the list is refreshed by every successful save afterwards,
+      // so re-reading it on every tab click would be a round trip for no new information.
+      if (id === "history" && model.saved.list === null) void listFlow();
     },
     saveSettings(input) {
       return saveFlow(shell.saveSettings(input));
@@ -473,6 +782,25 @@ export function mountPanel(adapter: PlatformAdapter, shell: Shell): PanelHandle 
       // against a stale index (the transcript grows while a click is in flight), not a case.
       if (turn === undefined || !isTextTurn(turn)) return;
       void copyText(turn.text);
+    },
+    searchConversations(query) {
+      dispatch({ type: "history-query", query });
+    },
+    askConversations(question) {
+      if (model.saved.asking || question === "") return;
+      void findFlow(question, session);
+    },
+    openConversation(id) {
+      void openConversationFlow(id);
+    },
+    deleteConversation(id) {
+      void deleteFlow(id);
+    },
+    confirmClearConversations(pending) {
+      dispatch({ type: "history-confirm-clear", pending });
+    },
+    clearConversations() {
+      void clearFlow();
     },
   };
 

@@ -10,10 +10,11 @@
  * and because `available(ctx)` decides membership at render time.
  */
 import { chatView } from "./views/chat";
+import { historyView } from "./views/history";
 import { settingsView } from "./views/settings";
 import type { PanelView } from "./views";
 
-export const VIEWS: PanelView[] = [chatView, settingsView];
+export const VIEWS: PanelView[] = [chatView, historyView, settingsView];
 
 /**
  * Takes a plain string, not `PanelView["id"]`: the view id can come from persisted UI

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ConversationRecord } from "../../src/core/history";
 import type { ChatMessage } from "../../src/core/messaging";
 import { createDesktopShell } from "../../src/shell/desktop";
 import {
@@ -218,5 +219,93 @@ describe("desktop shell settings and ui state", () => {
   it("sends the ui state blob verbatim on save", async () => {
     await createDesktopShell().saveUiState({ view: "settings" });
     expect(companion.requests).toEqual([{ type: "save-ui-state", state: { view: "settings" } }]);
+  });
+});
+
+describe("desktop shell history", () => {
+  const SUMMARY = {
+    id: "1767225600000-abc",
+    platform: "discord",
+    channelId: "c1",
+    title: "Spider-Man ISO isteği",
+    participants: [{ id: "u1", name: "Yunus" }],
+    messageCount: 1,
+    excerpt: "Spider man 2 Türkçe iso",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:05:00.000Z",
+  };
+  const RECORD: ConversationRecord = {
+    id: SUMMARY.id,
+    platform: "discord",
+    channelId: "c1",
+    title: SUMMARY.title,
+    participants: SUMMARY.participants,
+    messages: [
+      {
+        platform: "discord",
+        id: "1000000000000000001",
+        channel: { id: "c1" },
+        author: { id: "u1", name: "Yunus", isBot: false },
+        content: "Spider man 2 Türkçe iso",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        attachments: [],
+        embeds: [],
+        reactions: [],
+        mentions: [],
+        isSystem: false,
+      },
+    ],
+    turns: [{ role: "assistant", text: "Yunus bir ISO dosyası arıyor." }],
+    history: [{ role: "user", content: "explain" }],
+    createdAt: SUMMARY.createdAt,
+    updatedAt: SUMMARY.updatedAt,
+  };
+
+  it("asks the companion for the list and hands back the summaries", async () => {
+    companion.reply["list-conversations"] = { conversations: [SUMMARY] };
+    await expect(createDesktopShell().listConversations()).resolves.toEqual([SUMMARY]);
+    expect(companion.requests).toEqual([{ type: "list-conversations" }]);
+  });
+
+  it("throws when the companion answers the list with something that is not a list", async () => {
+    companion.reply["list-conversations"] = { ok: true };
+    await expect(createDesktopShell().listConversations()).rejects.toThrow(/companion returned a malformed conversation list/);
+  });
+
+  it("loads one conversation by id and reads {conversation:null} as 'no such conversation'", async () => {
+    companion.reply["load-conversation"] = { conversation: RECORD };
+    await expect(createDesktopShell().loadConversation(RECORD.id)).resolves.toEqual(RECORD);
+    expect(companion.requests).toEqual([{ type: "load-conversation", id: RECORD.id }]);
+
+    companion.reply["load-conversation"] = { conversation: null };
+    await expect(createDesktopShell().loadConversation(RECORD.id)).resolves.toBeNull();
+  });
+
+  it("throws when the companion answers load-conversation with a record it cannot read", async () => {
+    companion.reply["load-conversation"] = { conversation: { id: "x", messages: [] } };
+    await expect(createDesktopShell().loadConversation("x")).rejects.toThrow(/companion returned a malformed conversation/);
+  });
+
+  it("sends the record verbatim on save and passes a full store back as words, not an exception", async () => {
+    await expect(createDesktopShell().saveConversation(RECORD)).resolves.toEqual({ ok: true });
+    expect(companion.requests).toEqual([{ type: "save-conversation", record: RECORD }]);
+
+    companion.reply["save-conversation"] = { ok: false, error: "Could not save this conversation to /tmp/x.json: ENOSPC" };
+    await expect(createDesktopShell().saveConversation(RECORD)).resolves.toEqual({
+      ok: false,
+      error: "Could not save this conversation to /tmp/x.json: ENOSPC",
+    });
+  });
+
+  it("throws when the companion answers save-conversation with neither an ok nor an error", async () => {
+    companion.reply["save-conversation"] = { saved: "sure" };
+    await expect(createDesktopShell().saveConversation(RECORD)).rejects.toThrow(/companion returned a malformed save result/);
+  });
+
+  it("sends delete and clear as bare requests", async () => {
+    const shell = createDesktopShell();
+    await shell.deleteConversation(RECORD.id);
+    await shell.clearConversations();
+    expect(companion.requests).toEqual([{ type: "delete-conversation", id: RECORD.id }, { type: "clear-conversations" }]);
   });
 });

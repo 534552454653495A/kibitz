@@ -16,6 +16,8 @@
  * The providers are the single place that knows how to put a picture on the wire.
  */
 
+import type { ConversationRecord, ConversationSummary } from "./history";
+
 export const CHAT_PORT_NAME = "kibitz-chat";
 
 export type ChatRole = "system" | "user" | "assistant";
@@ -78,7 +80,14 @@ export type RuntimeRequest =
   | { type: "save-settings"; input: SettingsInputMessage }
   | { type: "request-access"; origin: string }
   | { type: "load-ui-state" }
-  | { type: "save-ui-state"; state: Record<string, unknown> };
+  | { type: "save-ui-state"; state: Record<string, unknown> }
+  // History. Both hosts answer these; only the storage behind them differs, which is why the
+  // shapes live here next to the rest of the protocol rather than per host.
+  | { type: "list-conversations" }
+  | { type: "load-conversation"; id: string }
+  | { type: "save-conversation"; record: ConversationRecord }
+  | { type: "delete-conversation"; id: string }
+  | { type: "clear-conversations" };
 
 export interface SettingsInputMessage {
   provider: string;
@@ -98,7 +107,6 @@ export interface SettingsStatus {
   model?: string;
 }
 
-/** Settings as the UI may see them: no key, only whether one is stored. */
 export interface SettingsDraftMessage {
   provider: string;
   baseUrl: string;
@@ -114,6 +122,8 @@ export type SaveSettingsMessage = { ok: true } | { ok: false; error: string; gra
 
 export type RuntimeResponse =
   | SettingsStatus
+  | { conversations: ConversationSummary[] }
+  | { conversation: ConversationRecord | null }
   | { draft: SettingsDraftMessage | null }
   | SaveSettingsMessage
   | { granted: boolean }

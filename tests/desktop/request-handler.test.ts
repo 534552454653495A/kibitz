@@ -1,6 +1,7 @@
 import { setImmediate as nextTick } from "node:timers/promises";
 import { beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { createDesktopRequestHandler, type DesktopRequestHandler, type RequestHandlerDeps } from "../../desktop/request-handler";
+import { byRecency, type ConversationRecord, summarise } from "../../src/core/history";
 import type { ChatMessage } from "../../src/core/messaging";
 import { AUTO_LANGUAGE, type Settings } from "../../src/core/settings";
 import type { DesktopDelivery } from "../../src/shell/desktop-protocol";
@@ -58,6 +59,9 @@ interface Harness {
   openOptions: Mock;
   /** What the handler persisted, standing in for settings.json and ui-state.json. */
   written: { settings: Settings | null; uiState: Record<string, unknown> };
+  /** Stands in for the history directory; `saveError` makes the next save fail like a full disk. */
+  history: Map<string, ConversationRecord>;
+  saveError: { message: string | null };
 }
 
 function harness(settings: Settings | null): Harness {
@@ -65,6 +69,8 @@ function harness(settings: Settings | null): Harness {
   const listeners: Array<() => void> = [];
   const openOptions = vi.fn();
   const written = { settings, uiState: {} as Record<string, unknown> };
+  const history = new Map<string, ConversationRecord>();
+  const saveError: { message: string | null } = { message: null };
   const deps: RequestHandlerDeps = {
     loadSettings: async () => written.settings,
     saveSettings: async (next) => {
@@ -74,6 +80,17 @@ function harness(settings: Settings | null): Harness {
     saveUiState: async (state) => {
       written.uiState = state;
     },
+    listConversations: async () => [...history.values()].map(summarise).sort(byRecency),
+    loadConversation: async (id) => history.get(id) ?? null,
+    saveConversation: async (record) => {
+      if (saveError.message !== null) return { ok: false, error: saveError.message };
+      history.set(record.id, record);
+      return { ok: true };
+    },
+    deleteConversation: async (id) => {
+      history.delete(id);
+    },
+    clearConversations: async () => history.clear(),
     deliver: async (json) => {
       deliveries.push(JSON.parse(json) as DesktopDelivery);
       for (const fn of listeners.splice(0)) fn();
@@ -96,6 +113,8 @@ function harness(settings: Settings | null): Harness {
     deliveries,
     openOptions,
     written,
+    history,
+    saveError,
     terminal: (requestId) =>
       waitFor(() => deliveries.find((d) => d.requestId === requestId && (d.type === "done" || d.type === "error"))),
     nth: (n) => waitFor(() => deliveries[n - 1]),
@@ -351,6 +370,101 @@ describe("ui state requests", () => {
   });
 });
 
+describe("history requests", () => {
+  const RECORD = {
+    id: "1767225600000-abc",
+    platform: "discord",
+    channelId: "c1",
+    title: "Spider-Man ISO isteği",
+    participants: [{ id: "u1", name: "Yunus" }],
+    messages: [
+      {
+        platform: "discord",
+        id: "1000000000000000001",
+        channel: { id: "c1" },
+        author: { id: "u1", name: "Yunus", isBot: false },
+        content: "Spider man 2 Türkçe iso",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        attachments: [],
+        embeds: [],
+        reactions: [],
+        mentions: [],
+        isSystem: false,
+      },
+    ],
+    turns: [{ role: "assistant", text: "Yunus bir ISO dosyası arıyor." }],
+    history: [{ role: "user", content: "explain" }],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:05:00.000Z",
+  };
+
+  it("saves a conversation, then lists it as a summary with no transcript in it", async () => {
+    const h = harness(SETTINGS);
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-conversation", record: RECORD })))).toEqual({ ok: true });
+
+    const listed = JSON.parse(await h.handler.handle(JSON.stringify({ type: "list-conversations" })));
+    expect(listed).toEqual({
+      conversations: [
+        {
+          id: RECORD.id,
+          platform: "discord",
+          channelId: "c1",
+          title: "Spider-Man ISO isteği",
+          participants: [{ id: "u1", name: "Yunus" }],
+          messageCount: 1,
+          excerpt: "Spider man 2 Türkçe iso",
+          createdAt: RECORD.createdAt,
+          updatedAt: RECORD.updatedAt,
+        },
+      ],
+    });
+  });
+
+  it("loads a saved conversation back whole, and answers null for an unknown id", async () => {
+    const h = harness(SETTINGS);
+    await h.handler.handle(JSON.stringify({ type: "save-conversation", record: RECORD }));
+
+    const loaded = JSON.parse(await h.handler.handle(JSON.stringify({ type: "load-conversation", id: RECORD.id })));
+    expect(loaded).toMatchObject({ conversation: { id: RECORD.id, turns: RECORD.turns, history: RECORD.history } });
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "load-conversation", id: "nope" })))).toEqual({ conversation: null });
+  });
+
+  it("deletes one conversation and clears the rest without touching the settings", async () => {
+    const h = harness(SETTINGS);
+    await h.handler.handle(JSON.stringify({ type: "save-conversation", record: RECORD }));
+    await h.handler.handle(JSON.stringify({ type: "save-conversation", record: { ...RECORD, id: "1767225600000-two" } }));
+
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "delete-conversation", id: RECORD.id })))).toEqual({ ok: true });
+    expect([...h.history.keys()]).toEqual(["1767225600000-two"]);
+
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "clear-conversations" })))).toEqual({ ok: true });
+    expect(h.history.size).toBe(0);
+    expect(h.written.settings).toEqual(SETTINGS);
+  });
+
+  it("reports a failed save in words instead of throwing across the binding", async () => {
+    const h = harness(SETTINGS);
+    h.saveError.message = "Could not save this conversation to /tmp/history/x.json: ENOSPC";
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-conversation", record: RECORD })))).toEqual({
+      ok: false,
+      error: "Could not save this conversation to /tmp/history/x.json: ENOSPC",
+    });
+    expect(h.history.size).toBe(0);
+  });
+
+  it("refuses a save-conversation whose record is not a conversation, so nothing unreadable is stored", async () => {
+    const h = harness(SETTINGS);
+    const reply = await h.handler.handle(JSON.stringify({ type: "save-conversation", record: { id: "x", messages: [] } }));
+    expect(JSON.parse(reply)).toMatchObject({ ok: false });
+    expect(h.history.size).toBe(0);
+  });
+
+  it("refuses a load-conversation without an id", async () => {
+    const h = harness(SETTINGS);
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "load-conversation" })))).toMatchObject({ ok: false });
+  });
+});
+
 describe("malformed input", () => {
   it("answers {ok:false} to non-JSON instead of throwing across the CDP binding", async () => {
     const h = harness(SETTINGS);
@@ -362,5 +476,26 @@ describe("malformed input", () => {
     expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "chat", messages: MESSAGES })))).toMatchObject({ ok: false });
     expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "reboot" })))).toMatchObject({ ok: false });
     expect(stub.created).toBe(0);
+  });
+});
+
+// Failure mode defended, and it cost an hour: the companion is a Node process that loads its
+// code at start. The bundle watcher re-arms the RENDERER, never this process, so after pulling
+// a new version the panel can speak a protocol the running companion has never heard of. It
+// answered "malformed request", which reads like a bug in the panel.
+describe("version skew", () => {
+  it("names the unknown request type and says to restart, instead of 'malformed request'", async () => {
+    const h = harness(SETTINGS);
+    const reply: unknown = JSON.parse(await h.handler.handle(JSON.stringify({ type: "summon-a-dragon" })));
+    expect(reply).toEqual({
+      ok: false,
+      error: expect.stringContaining('does not understand "summon-a-dragon"'),
+    });
+    expect(reply).toMatchObject({ error: expect.stringContaining("npm run desktop") });
+  });
+
+  it("still says 'malformed request' for something with no type at all", async () => {
+    const h = harness(SETTINGS);
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ nope: 1 })))).toEqual({ ok: false, error: "malformed request" });
   });
 });

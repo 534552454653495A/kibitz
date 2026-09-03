@@ -13,6 +13,7 @@
  */
 import { classifyError } from "../src/background/providers/errors";
 import { createProvider } from "../src/background/providers/index";
+import { type ConversationRecord, type ConversationSummary, parseConversation, type SaveHistoryResult } from "../src/core/history";
 import type { ChatRequest, SettingsInputMessage, SettingsStatus } from "../src/core/messaging";
 import { applyImagePolicy, applyLanguagePolicy, mergeSettingsInput, type Settings } from "../src/core/settings";
 import { isRecord } from "../src/core/validate";
@@ -26,6 +27,16 @@ export interface RequestHandlerDeps {
   /** Panel geometry and last open view. Never secrets, hence a file of its own. */
   loadUiState: () => Promise<Record<string, unknown>>;
   saveUiState: (state: Record<string, unknown>) => Promise<void>;
+  /**
+   * Saved conversations, one store away from settings so the file holding the API key is
+   * never on the path that writes a transcript. Injected like the rest so the tests drive
+   * the handler without a disk.
+   */
+  listConversations: () => Promise<ConversationSummary[]>;
+  loadConversation: (id: string) => Promise<ConversationRecord | null>;
+  saveConversation: (record: ConversationRecord) => Promise<SaveHistoryResult>;
+  deleteConversation: (id: string) => Promise<void>;
+  clearConversations: () => Promise<void>;
   /** Pushes one DesktopDelivery JSON string into the page. */
   deliver: (json: string) => Promise<unknown>;
   /** The desktop has no options page; the companion tells the user what to run instead. */
@@ -61,6 +72,8 @@ function parseRequest(raw: unknown): DesktopRequest | null {
     case "open-options":
     case "load-settings":
     case "load-ui-state":
+    case "list-conversations":
+    case "clear-conversations":
       return { type: raw.type };
     case "save-settings": {
       const input = parseInput(raw.input);
@@ -72,6 +85,16 @@ function parseRequest(raw: unknown): DesktopRequest | null {
       return isRecord(raw.state) ? { type: "save-ui-state", state: raw.state } : null;
     case "cancel":
       return typeof raw.requestId === "string" ? { type: "cancel", requestId: raw.requestId } : null;
+    case "load-conversation":
+    case "delete-conversation":
+      return typeof raw.id === "string" ? { type: raw.type, id: raw.id } : null;
+    // The record crossed the CDP binding as JSON from Discord's own realm, so it is parsed
+    // with the storage validator rather than cast: whatever is accepted here is written to
+    // disk and rendered back into the panel later.
+    case "save-conversation": {
+      const record = parseConversation(raw.record);
+      return record === null ? null : { type: "save-conversation", record };
+    }
     case "chat":
       return typeof raw.requestId === "string" && Array.isArray(raw.messages)
         ? { type: "chat", requestId: raw.requestId, messages: raw.messages as ChatRequest["messages"] }
@@ -168,6 +191,20 @@ export function createDesktopRequestHandler(deps: RequestHandlerDeps): DesktopRe
       case "open-options":
         deps.openOptions();
         return { ok: true };
+      case "list-conversations":
+        return { conversations: await deps.listConversations() };
+      case "load-conversation":
+        return { conversation: await deps.loadConversation(request.id) };
+      // The one request whose failure is answered rather than thrown: the store being full
+      // is the user's problem to fix, and the panel has to say which one it is.
+      case "save-conversation":
+        return await deps.saveConversation(request.record);
+      case "delete-conversation":
+        await deps.deleteConversation(request.id);
+        return { ok: true };
+      case "clear-conversations":
+        await deps.clearConversations();
+        return { ok: true };
     }
   };
 
@@ -181,8 +218,18 @@ export function createDesktopRequestHandler(deps: RequestHandlerDeps): DesktopRe
       }
       const request = parseRequest(raw);
       if (request === null) {
-        log.warn("ignoring malformed desktop request");
-        return JSON.stringify({ ok: false, error: "malformed request" } satisfies DesktopReply);
+        // A request the renderer sends and this process has never heard of means one thing in
+        // practice: the companion is running code older than the bundle in Discord. Only a
+        // restart fixes that — the watcher re-arms the *renderer*, never this Node process —
+        // and "malformed request" sent an hour of debugging in the wrong direction
+        // (AGENTS.md 12, 2026-09-03). Say which type and what to do.
+        const type = isRecord(raw) && typeof raw.type === "string" ? raw.type : null;
+        const error =
+          type === null
+            ? "malformed request"
+            : `this companion does not understand "${type}" — it is running older code than the Kibitz bundle in Discord. Restart it (npm run desktop).`;
+        log.warn(`ignoring desktop request: ${error}`);
+        return JSON.stringify({ ok: false, error } satisfies DesktopReply);
       }
       try {
         return JSON.stringify(await dispatch(request));

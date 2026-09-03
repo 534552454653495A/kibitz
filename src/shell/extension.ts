@@ -10,6 +10,7 @@
  * `sendMessage` whose listener threw resolves with `undefined`, so an unchecked cast would
  * surface a service-worker crash as a blank settings form instead of an error.
  */
+import type { ConversationRecord, ConversationSummary, SaveHistoryResult } from "../core/history";
 import type {
   ChatMessage,
   PortRequest,
@@ -20,7 +21,7 @@ import type {
 import { CHAT_PORT_NAME } from "../core/messaging";
 import { isRecord } from "../core/validate";
 import { ext } from "../shared/ext";
-import { readDraft, readGranted, readSaveResult, readUiState } from "./replies";
+import { readConversation, readConversations, readDraft, readGranted, readSaveResult, readUiState } from "./replies";
 import { ChatError, type SaveSettingsResult, type SettingsDraft, type SettingsInput, type Shell, type StreamChatOptions } from "./types";
 
 function streamChat(messages: ChatMessage[], { onDelta, signal }: StreamChatOptions): Promise<void> {
@@ -114,6 +115,31 @@ async function openOptions(): Promise<void> {
   await call({ type: "open-options" });
 }
 
+async function listConversations(): Promise<ConversationSummary[]> {
+  return readConversations(await call({ type: "list-conversations" }), "background");
+}
+
+async function loadConversation(id: string): Promise<ConversationRecord | null> {
+  return readConversation(await call({ type: "load-conversation", id }), "background");
+}
+
+/**
+ * The save reply is the settings save shape (`{ok}` plus an error sentence), so it is read
+ * with the same validator rather than a second copy of it; history has no `grantOrigin`,
+ * and a host that sent one would simply be ignored by the caller's type.
+ */
+async function saveConversation(record: ConversationRecord): Promise<SaveHistoryResult> {
+  return readSaveResult(await call({ type: "save-conversation", record }), "background");
+}
+
+async function deleteConversation(id: string): Promise<void> {
+  await call({ type: "delete-conversation", id });
+}
+
+async function clearConversations(): Promise<void> {
+  await call({ type: "clear-conversations" });
+}
+
 export function createExtensionShell(): Shell {
   return {
     streamChat,
@@ -124,6 +150,11 @@ export function createExtensionShell(): Shell {
     openOptions,
     loadUiState,
     saveUiState,
+    listConversations,
+    loadConversation,
+    saveConversation,
+    deleteConversation,
+    clearConversations,
     // The panel runs in the isolated world: Discord's JS cannot read what is typed into it,
     // so the settings view may take the key without the warning the desktop host needs.
     capabilities: { keyIsPageVisible: false, canOpenOptionsPage: true },

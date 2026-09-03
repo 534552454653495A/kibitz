@@ -717,3 +717,39 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   exchange by a familiar face, and closing the panel is the way to start over.
   Mutation-checked: dropping reply-into fails 1 test, dropping the mirror fails 1, admitting
   everything fails 2.
+- **2026-09-03 — Conversation history (owner's request), and the decisions inside it.** Saved
+  conversations, a list in the panel, and search "not necessarily word-based — I want to ask
+  the AI: Yunus had this thing about AI, can you find it in our past conversations?"
+  Decisions the owner made, with what each one costs:
+  1. **Unlimited retention.** Nothing is pruned; only their delete removes anything. That is
+     why `unlimitedStorage` is in the manifest — it lifts Chrome's 10 MB quota and grants no
+     new access. A full or unwritable store therefore has to be *said*: `saveConversation`
+     returns `{ok:false,error}` and the panel shows it as a turn, because the alternative is an
+     answer that silently was not kept.
+  2. **One request for the AI search**, over a one-line-per-conversation catalogue, not a
+     two-pass read of the top hits. A question asked casually must not cost twice.
+  3. **Model-written titles**, 3-5 words, one small request after the first answer only, with
+     `fallbackTitle` (author + their words) until then and forever if it fails. A title is not
+     worth an error the user has to read.
+  `Turn` moved to `src/core/history.ts`: a saved conversation has to be re-openable, so the
+  transcript is part of the record, and a record is something both hosts read — the panel's
+  state machine imports the core's shape rather than declaring a second one.
+  Both `turns` and `history` are stored because neither derives from the other: a synthesis
+  after "Scan related messages" replaces the model history with a thread prompt the display
+  never had, and the display carries notes and errors the model never saw.
+  The local filter narrows the catalogue **only when it matched something** — a prose question
+  matches no line literally, and an empty catalogue would make the request pointless. That one
+  line is what makes the owner's own example work.
+  Verified live on their Discord with their own provider: the record on disk carried the
+  Turkish title the model wrote, the transcript round-tripped (`[system, user, assistant]`),
+  the filter narrowed 1 → 0 rows on a nonsense word, and the prose question "hangi sohbette
+  videodan bahsetmiştik, bulabilir misin?" — which filters everything out — came back naming
+  the conversation, the person and the date, with a button that reopened it.
+- **2026-09-03 — "malformed request" meant "restart the companion".** Every history request
+  came back `{ok:false,error:"malformed request"}` against a companion whose own code predated
+  the feature. The bundle watcher re-arms the **renderer**; nothing re-arms the Node process,
+  which loads its code once at start. The reply now names the type and says what to do
+  ("this companion does not understand "save-conversation" — restart it (npm run desktop)"),
+  because the previous wording pointed the search at the panel, which was innocent.
+  Rule: a protocol error must say which side is behind, or it sends the reader to the wrong
+  half of the system.

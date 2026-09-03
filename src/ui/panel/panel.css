@@ -200,6 +200,210 @@
   overscroll-behavior: contain;
 }
 
+/* ---------- history ---------- */
+
+/* The view itself does not scroll: the list does, so the search box and the sentence about
+   what `Ask` sends stay in sight while the user scrolls a thousand conversations. */
+.view.history {
+  overflow: hidden;
+}
+
+.search {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid #303339;
+  border-radius: 8px;
+  padding: 6px 9px;
+  background: #101114;
+  color: #e3e5e8;
+  font: inherit;
+  font-size: 13px;
+}
+
+.search-input:focus {
+  border-color: #4a5ad4;
+  outline: none;
+}
+
+/* Not `small`: what leaves the machine when `Ask` is pressed is the one thing in this view
+   a user must be able to read without hunting for it. */
+.disclose {
+  flex: 0 0 auto;
+  margin: 0;
+  border: 1px solid #303339;
+  border-left: 3px solid #4a5ad4;
+  border-radius: 6px;
+  padding: 7px 9px;
+  background: #1b1c20;
+  color: #9aa0a8;
+  font-size: 11px;
+}
+
+.disclose strong {
+  color: #e3e5e8;
+}
+
+.disclose-sample {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 5px;
+}
+
+.disclose-sample code {
+  color: #71757c;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.find {
+  flex: 0 0 auto;
+  max-height: 40%;
+  overflow-y: auto;
+  /* Reaching the end of our pane must not scroll Discord's message list: scroll
+     chaining ignores stopPropagation, so containment has to be declared here. */
+  overscroll-behavior: contain;
+  border: 1px solid #26282d;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #1e2024;
+  overflow-wrap: anywhere;
+}
+
+.find p {
+  margin: 0 0 6px;
+}
+
+.find p:last-child {
+  margin-bottom: 0;
+}
+
+/* The waiting glyph and any code the model quotes back get the transcript's treatment: the
+   AI search answer is model output like any other, only in a different pane. */
+.find .dots {
+  color: #8b8f97;
+  letter-spacing: 2px;
+}
+
+.find code {
+  border-radius: 4px;
+  padding: 0 3px;
+  background: #101114;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.find-matches {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.entries {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* Reaching the end of our pane must not scroll Discord's message list: scroll
+     chaining ignores stopPropagation, so containment has to be declared here. */
+  overscroll-behavior: contain;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  scrollbar-width: thin;
+}
+
+.entry {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.entry-open {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+  appearance: none;
+  border: 1px solid #26282d;
+  border-radius: 8px;
+  padding: 6px 9px;
+  background: #1b1c20;
+  color: #e3e5e8;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.entry-open:hover,
+.entry-open:focus-visible {
+  border-color: #4a5ad4;
+  background: #22242a;
+  outline: none;
+}
+
+.entry-title {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entry-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: #8b8f97;
+  font-size: 11px;
+  overflow: hidden;
+}
+
+.entry-people {
+  color: #9aa0a8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entry-count {
+  white-space: nowrap;
+}
+
+.entry .icon-button {
+  flex: 0 0 auto;
+  height: auto;
+}
+
+.entry .icon-button:hover {
+  background: #4a2429;
+  color: #ffb3b3;
+}
+
+/* The only irreversible button in the panel; it looks like one, and only once armed. */
+.button.danger {
+  background: #6d2a30;
+  color: #ffd9d9;
+}
+
+.button.danger:hover {
+  background: #85333a;
+}
+
 /* ---------- the message being asked about ---------- */
 
 .card {

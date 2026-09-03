@@ -10,6 +10,7 @@
  * `host` is only there so the thrown message names who misbehaved; a panel that shows
  * "companion returned a malformed settings draft" tells the user which half to restart.
  */
+import { type ConversationRecord, type ConversationSummary, parseConversation, parseSummary } from "../core/history";
 import { AUTO_LANGUAGE, PROVIDER_IDS, type ProviderId } from "../core/settings";
 import { isRecord } from "../core/validate";
 import type { SaveSettingsResult, SettingsDraft } from "./types";
@@ -75,4 +76,27 @@ export function readGranted(reply: Record<string, unknown>, host: string): boole
  */
 export function readUiState(reply: Record<string, unknown>): Record<string, unknown> {
   return isRecord(reply.state) ? reply.state : {};
+}
+
+/**
+ * A history list is allowed to be incomplete but not to be absent: an entry the host wrote
+ * before a field existed is dropped so the other conversations still reach the list, while
+ * a reply with no list at all is a protocol bug the panel should surface, not render as
+ * "you have no history" over a store that is full of it.
+ */
+export function readConversations(reply: Record<string, unknown>, host: string): ConversationSummary[] {
+  const { conversations } = reply;
+  if (!Array.isArray(conversations)) throw new Error(`${host} returned a malformed conversation list`);
+  return conversations.flatMap((entry) => {
+    const summary = parseSummary(entry);
+    return summary === null ? [] : [summary];
+  });
+}
+
+/** `{conversation:null}` means "no such conversation"; a record we cannot read is a bug. */
+export function readConversation(reply: Record<string, unknown>, host: string): ConversationRecord | null {
+  if (reply.conversation === null) return null;
+  const record = parseConversation(reply.conversation);
+  if (record === null) throw new Error(`${host} returned a malformed conversation`);
+  return record;
 }

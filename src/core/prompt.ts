@@ -11,6 +11,8 @@ import type { ChatImage, ChatMessage } from "./messaging";
 import { serializeMessage, serializeThread } from "./context";
 import type { UniversalAttachment, UniversalMessage, UniversalThread } from "./types";
 import explainTemplate from "./prompts/explain.md";
+import findTemplate from "./prompts/find.md";
+import titleTemplate from "./prompts/title.md";
 import synthesizeTemplate from "./prompts/synthesize.md";
 import systemPrompt from "./prompts/system.md";
 
@@ -116,6 +118,30 @@ export function buildSynthesisMessages(t: UniversalThread): ChatMessage[] {
     thread: serializeThread(t, { charBudget: THREAD_CHAR_BUDGET, attachedImageIds }),
   });
   return [{ role: "system", content: systemPrompt }, withImages(content, picked)];
+}
+
+/**
+ * A one-shot request for a conversation's title. Deliberately NOT part of the conversation's
+ * own history: a title turn in there would be context the model re-reads on every follow-up,
+ * and the user would see it in the transcript.
+ *
+ * The system prompt comes along so the answer-language policy (attached host-side) lands on a
+ * request that already knows what Kibitz is — a title in the wrong language is worse than no
+ * title, because the list is where languages are most visible.
+ */
+export function buildTitleMessages(message: UniversalMessage, answer: string): ChatMessage[] {
+  const content = renderTemplate(titleTemplate, { message: serializeMessage(message, {}), answer });
+  return [{ role: "system", content: systemPrompt }, { role: "user", content }];
+}
+
+/**
+ * The history search: one request carrying a one-line catalogue of the user's conversations
+ * plus their question. Single-pass by decision (owner, 2026-09-03) — the alternative reads the
+ * full text of the top few and costs twice as much for a question asked casually.
+ */
+export function buildFindMessages(catalogue: string, question: string): ChatMessage[] {
+  const content = renderTemplate(findTemplate, { catalogue, question });
+  return [{ role: "system", content: systemPrompt }, { role: "user", content }];
 }
 
 /** Returns a new history; the caller keeps the old one as the "before" snapshot. */
