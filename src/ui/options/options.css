@@ -91,6 +91,23 @@ input:focus {
   color: var(--muted);
 }
 
+/*
+  A checkbox row, not a stacked field: `input { width: 100% }` above would stretch the box
+  across the form and detach it from its own label, so the row overrides width and lays the
+  box beside the text it toggles.
+*/
+.check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.check input[type="checkbox"] {
+  width: auto;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
 .actions {
   display: flex;
   align-items: center;
@@ -155,4 +172,19 @@ button:disabled {
   border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 0.9rem;
+}
+
+/*
+  Grant mode (options.html?grant=…) renders in a 460×340 popup, so the origin is the one
+  thing that must be unmissable: the user is being asked to approve exactly that address.
+*/
+.grant-origin {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--field-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.95rem;
+  overflow-wrap: anywhere;
 }

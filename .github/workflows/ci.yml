@@ -31,12 +31,19 @@ jobs:
       - run: npm run check
       - name: Pipeline script contract test (stubbed gh, no network)
         run: bash tests/scripts/upsert-issue.test.sh
+      - name: AGENTS.md structure (the fix agent reads it as ground truth)
+        run: bash tests/scripts/agents-ledger.test.sh
       - name: Extension self-test (fixture page, no account)
         timeout-minutes: 5
         run: npm run probe:selftest
+      - name: Desktop self-test (same fixture, injected over CDP like the companion does)
+        timeout-minutes: 5
+        run: npm run probe:selftest:desktop
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: probe-fixture
-          path: probe-out/fixture
+          path: |
+            probe-out/fixture
+            probe-out/fixture-desktop
           retention-days: 7

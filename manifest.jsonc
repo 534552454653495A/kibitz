@@ -12,9 +12,12 @@
   // 120 = Promise.withResolvers and the other ES2024 APIs the bundle uses unpolyfilled.
   "minimum_chrome_version": "120",
 
-  // The only install-time permission. Settings (API key, provider, model) live in
-  // chrome.storage.local — never `sync`, so the key never leaves the machine via Google.
-  "permissions": ["storage"],
+  // Install-time permissions, both about local storage and nothing else. Settings (API key,
+  // provider, model) live in chrome.storage.local — never `sync`, so the key never leaves the
+  // machine via Google. `unlimitedStorage` lifts the 10MB quota because conversation history is
+  // kept until the user deletes it (owner's decision, 2026-09-03); it grants no access the
+  // extension did not already have and Chrome shows no warning for it.
+  "permissions": ["storage", "unlimitedStorage"],
 
   // Zero host access by default. The options page requests exactly the origin of the
   // API base URL the user typed (e.g. https://api.openai.com/*) via permissions.request().

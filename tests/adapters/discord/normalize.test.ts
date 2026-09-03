@@ -112,6 +112,31 @@ describe("normalizeMessage attachments", () => {
     );
     expect(m.attachments).toEqual([{ id: "1", kind: "file", name: "a.png", url: "https://proxy/a.png" }]);
   });
+
+  it("gives images a resized previewUrl and other kinds none, so only pictures cost proxy tokens", () => {
+    const m = normalizeMessage(
+      raw({
+        attachments: [
+          { id: "1", filename: "a.png", url: "https://cdn.discordapp.com/attachments/1/2/a.png?ex=1&hm=beef", content_type: "image/png" },
+          { id: "2", filename: "b.mp4", url: "https://cdn.discordapp.com/attachments/1/2/b.mp4?ex=1&hm=beef", content_type: "video/mp4" },
+        ],
+      }),
+      ctx,
+    );
+    expect(m.attachments[0]?.previewUrl).toBe(
+      "https://media.discordapp.net/attachments/1/2/a.png?ex=1&hm=beef&format=webp&width=1024&height=1024",
+    );
+    expect(m.attachments[0]?.url).toBe("https://cdn.discordapp.com/attachments/1/2/a.png?ex=1&hm=beef");
+    expect(m.attachments[1]?.previewUrl).toBeUndefined();
+  });
+
+  it("leaves previewUrl off an image hosted outside Discord's CDN rather than inventing one", () => {
+    const m = normalizeMessage(
+      raw({ attachments: [{ id: "1", filename: "a.png", url: "https://elsewhere.test/a.png", content_type: "image/png" }] }),
+      ctx,
+    );
+    expect(m.attachments[0]).toEqual({ id: "1", kind: "image", name: "a.png", url: "https://elsewhere.test/a.png", mimeType: "image/png" });
+  });
 });
 
 describe("normalizeMessage embeds", () => {

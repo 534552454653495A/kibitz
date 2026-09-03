@@ -24,7 +24,8 @@ knowingly. Do not use it on an account you cannot afford to lose.
 **Your messages go to your AI provider.** When you click ✦, the message (and, if you scan,
 the surrounding messages) is sent from your browser to the API you configured — OpenAI,
 Anthropic, OpenRouter, a local Ollama, whatever you chose. Nothing is sent anywhere else.
-Read your provider's data policy.
+Image attachments go too, as a Discord CDN link your provider then fetches — see
+[Images](#images) for what that means and how to turn it off. Read your provider's data policy.
 
 **Your API key is your money.** It is stored in `chrome.storage.local` on this machine only
 (never `storage.sync`, so it is never uploaded to your Google account) and is used only by
@@ -55,38 +56,130 @@ scripts, MV3) but requires `background.scripts` instead of `service_worker` and 
 `browser_specific_settings.gecko` block. Contributions welcome; the seam is
 `src/shared/ext.ts` and `manifest.jsonc`.
 
+### Discord desktop app
+
+The desktop app is Electron running the same web client, so Kibitz works there too — but
+browser extensions cannot be installed into it. Instead, a small companion process starts
+Discord with a DevTools port and injects Kibitz over the Chrome DevTools Protocol. No
+file inside Discord's installation is modified, so Discord updates do not break it.
+
+```bash
+npm run build                  # builds dist/desktop-renderer.js alongside the extension
+npm run desktop -- setup       # provider, base URL, API key, model → settings.json (once)
+npm run desktop                # launches Discord with the flag, attaches, stays running
+```
+
+- Quit Discord first (or pass `--relaunch`): a running Discord cannot be given the flag
+  afterwards — Electron's single-instance lock forwards a second launch's arguments to the
+  first instance, which ignores them.
+- Keep the terminal open; `Ctrl+C` disconnects Kibitz and leaves Discord running.
+  Reload Discord (`Ctrl+R`) after changing settings.
+- After `npm run build`, the companion notices the new bundle and prints `renderer bundle
+  rebuilt`; press `Ctrl+R` in Discord to load it. Discord keeps executing the injected copy
+  until that reload, so an already-open window shows the old behaviour — if the terminal
+  never printed that line, restart the companion. (Extension equivalent:
+  `chrome://extensions` → ↻, then reload the Discord tab.)
+- Settings live in `%APPDATA%\kibitz\settings.json` (Windows), `~/Library/Application
+  Support/kibitz/` (macOS) or `~/.config/kibitz/` (Linux), readable only by your user.
+- `npm run desktop -- help` lists `--port`, `--attach` (connect to a Discord you started
+  yourself with `--remote-debugging-port=<port>`), `--relaunch`, `--bundle`, `--settings`.
+
+**Security note.** While Discord runs with `--remote-debugging-port`, any process on your
+machine can control it through that port (including reading your session) — the
+protocol has no authentication. The port is bound to `127.0.0.1` and picked from
+9300–9399. If you do not trust every program on your machine, use the extension instead.
+
+Tested on Windows. macOS (`open -a Discord --args …`) and Linux (`discord` on PATH or the
+Flatpak) launch paths exist but have not been exercised; reports welcome.
+
 ---
 
-## Configure your key (BYO key)
+## Configure your key (BYO key) — inside the panel
 
-Click the Kibitz toolbar icon (or open the extension's options page) and fill in:
+Open any Discord message's ✦ and click the **Settings** tab in the panel header. No separate
+page, no extension options screen (that still exists as a fallback).
 
 | Field | Notes |
 | --- | --- |
 | **Provider** | `OpenAI-compatible` covers OpenAI, OpenRouter, Groq, Gemini's OpenAI endpoint, Ollama, LM Studio — anything with `POST {baseUrl}/chat/completions`. `Anthropic` talks to the Messages API directly. |
 | **Base URL** | e.g. `https://api.openai.com/v1`, `https://openrouter.ai/api/v1`, `http://localhost:11434/v1`, `https://api.anthropic.com` |
-| **API key** | Stored locally only. For Ollama any non-empty string works. |
+| **API key** | Stored locally only; the field shows `••••` and never displays a stored key again. Leave it empty when editing other fields. For Ollama any non-empty string works. |
 | **Model** | e.g. `gpt-4o-mini`, `claude-sonnet-4-5`, `llama3.1` |
+| **Send images to the model** | On by default. Sends image attachments to your provider so it can describe them; needs a vision-capable model. See [Images](#images) below. |
+| **Answer language** | `Auto` answers in whatever language the message is written in (the default, and what every configuration made before this field does). Pick a language — or type your own label, e.g. `Türkçe, samimi ton` — and every answer comes back in it regardless of the message's language. |
 
-When you press **Save**, Chrome asks you to grant the extension access to **that one origin**
-(e.g. `https://api.openai.com`). Kibitz ships with zero host permissions; the grant is
-scoped to the API you typed. Press **Test** to send a one-line request and confirm the
-key, URL and model work together.
+**Save** persists immediately. In the extension, Chrome must then approve the one origin you
+typed (Kibitz ships with zero host access): the panel shows **Grant access**, which opens a
+small window with a single button. **Test** sends a one-line request and reports the answer
+or the exact error. Local servers: Ollama needs `OLLAMA_ORIGINS=chrome-extension://*`.
 
-Local servers: Ollama needs `OLLAMA_ORIGINS=chrome-extension://*` (or `*`) so it accepts
-requests from an extension origin.
+Where the key lives: extension → `chrome.storage.local` on this machine, never synced, and
+the page cannot read it (the panel runs in the extension's isolated world). Desktop → the
+companion's `settings.json`; typed into the panel it passes through Discord's own window, so
+`npm run desktop -- setup` in a terminal is the stricter route. The settings view says which
+of the two you are in.
 
 ---
 
 ## Use
 
 1. Open any Discord channel. Every message gets a small ✦ at the end of its text.
-2. Click ✦. The panel opens on the right and the AI explains the message.
-3. Ask follow-ups in the input at the bottom.
+2. Click ✦. The panel opens and the AI explains the message.
+   Clicking ✦ on **another message that belongs to the same conversation** adds it instead of
+   starting over: its card appears under the previous answer and the AI keeps everything it was
+   already told, so you get one thread that connects them. A message belongs if the person
+   already speaks in it, if it **replies** to something in it, or if something in it replies to
+   the message you clicked. Someone new talking about something else — or the same person in
+   another channel — starts a fresh conversation; clicking the ✦ of a message already answered
+   does nothing. To start over deliberately, close the panel (`Esc`).
+3. Ask follow-ups at the bottom — `Enter` sends, `Shift+Enter` is a newline,
+   `Ctrl/Cmd+Enter` sends from anywhere in the panel. **Stop** interrupts a running answer;
+   **Retry** re-sends the last failed one; each answer has a copy button.
 4. **Scan related messages** scrolls back through the channel (up to 200 messages / 45 s),
-   restores your scroll position, and asks the AI for a synthesis of the discussion around
-   the anchored message.
-5. `Esc` or ✕ closes the panel.
+   restores your scroll position, and asks for a synthesis of the discussion around the
+   anchored message.
+5. **Layout**: the header has dock-left, dock-right, float and expand. Drag the header to
+   move a floating panel (or drag a dock away from its edge to set it loose; drop it near an
+   edge to re-dock), drag the grip to resize. Your layout is remembered per host.
+6. `Esc` or ✕ closes the panel.
+
+### History
+
+Every conversation that got an answer is saved on this machine, and the **History** tab in the
+panel header lists them newest first — with a 3-5 word title the model writes once per
+conversation, the people in it and when it happened. Click one to reopen it: the cards, the
+answers and the model's own memory of it come back, so you can keep asking where you left off.
+Delete one, or delete all behind a confirm step.
+
+Nothing is pruned. Retention is unlimited until you delete something, which is why the
+extension asks for `unlimitedStorage` — it lifts Chrome's 10 MB quota and grants no access the
+extension did not already have. Where it lives: extension → `chrome.storage.local` (never
+synced); desktop → `history/` beside `settings.json`, one file per conversation, `0600` like the
+settings file, because a transcript of your DMs deserves the same care as a key.
+
+The one box above the list does two things. Typing filters instantly and locally — nothing
+leaves the machine. **Ask** hands the same box's text to your model as a question, together
+with a **one line per conversation** catalogue: id, date, the people, the title, and the first
+message's opening words. That is how "hangi sohbette videodan bahsetmiştik?" finds a
+conversation whose words you no longer remember. The panel shows the exact lines it will send
+and how many, because that is your own data leaving; the answers and the rest of the messages
+never do. One request per question, by design.
+
+### Images
+
+When the message you asked about has an image attached, Kibitz sends the picture to the API
+you configured, alongside the text. That needs a **vision-capable model** — `gpt-4o-mini`,
+`claude-sonnet-4-5` and most hosted models qualify; a small local model usually does not and
+will answer with an error instead. Images cost noticeably more tokens than the text around
+them, and Kibitz sends at most four per request.
+
+What is actually sent is **Discord's CDN link to the image, not a copy of the bytes**. Your
+provider fetches that link, so the provider sees it (and sees that you are reading Discord).
+The link is signed and expires, but it is a real Discord URL.
+
+Turn it off in the **Settings** tab (or the options page) with **Send images to the model**;
+attachments then travel as a text line naming the file and nothing is fetched. Existing
+configurations that predate this setting read as *on*.
 
 ### Troubleshooting
 
@@ -96,8 +189,11 @@ requests from an extension origin.
   from `top` to the **Kibitz** entry (the extension's isolated world — the flag is per JS
   world, so setting it in `top` does nothing), then run `KIBITZ_DEBUG = true`. Lines are
   prefixed `[kibitz]`.
-- **"no-permission" errors:** open the options page and press **Save** again to re-grant
-  the API origin.
+- **"Chrome must approve access…"**: press **Grant access** in the settings tab (or open the
+  extension's options page and save again).
+- **Typing goes into Discord's message box instead of the panel?** That was a real bug, fixed
+  by isolating events at our shadow host; if it ever comes back, `npm run probe`'s
+  `panel-input` check is the regression guard and the fix belongs in `src/ui/shadow-host.ts`.
 
 ---
 
@@ -136,7 +232,7 @@ reasons are in [AGENTS.md §7](AGENTS.md#7-self-repair-pipeline).
 | Secret | What |
 | --- | --- |
 | `DISCORD_PROBE_TOKEN` | Token of a **throwaway** Discord account. Automated use violates Discord's ToS and the account may be terminated — never use a personal one. If Discord challenges the login from GitHub's IPs, the probe files an `auto:probe-session` issue (no agent runs); use a self-hosted runner on a residential IP or a fresh account. |
-| `DISCORD_PROBE_CHANNEL` | `<guildId>/<channelId>` of a channel that account can read. |
+| `DISCORD_PROBE_CHANNEL` | `<guildId>/<channelId>` of a **text** channel that account can read (a forum or voice-only channel has no message list, which the probe reports as a failure). |
 | `ANTHROPIC_API_KEY` | For the fix/review agents (`claude -p`, budget-capped per run). |
 | `AI_FIX_TOKEN` | Fine-grained PAT (or GitHub App token) with **Contents**, **Issues**, **Pull requests** read/write on this repo only. Needed because events created with the default `GITHUB_TOKEN` do not trigger other workflows. |
 

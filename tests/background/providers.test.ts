@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAnthropicProvider } from "../../src/background/providers/anthropic";
 import { createOpenAiCompatibleProvider } from "../../src/background/providers/openai-compatible";
+import { classifyError } from "../../src/background/providers/errors";
 import { ProviderHttpError, ProviderStreamError } from "../../src/background/providers/types";
 
 const OPTIONS = { baseUrl: "https://example.test/v1", apiKey: "secret", model: "m" };
@@ -82,6 +83,59 @@ describe("openai-compatible provider", () => {
     const provider = createOpenAiCompatibleProvider(OPTIONS);
     await expect(collect(provider.stream([], new AbortController().signal))).rejects.toBeInstanceOf(ProviderStreamError);
   });
+
+  // The whole point of the feature: a picture must leave as an image part, not as a URL
+  // buried in the prose, or the model answers "I cannot see the image".
+  it("sends image_url parts before the text part when a user turn carries images", async () => {
+    const captured = stubFetch(sseResponse(`${chunk("x")}data: [DONE]\n\n`));
+    await collect(
+      createOpenAiCompatibleProvider(OPTIONS).stream(
+        [
+          { role: "system", content: "S" },
+          {
+            role: "user",
+            content: "explain",
+            images: [{ url: "https://media/a.png", name: "a.png" }, { url: "https://media/b.png" }],
+          },
+        ],
+        new AbortController().signal,
+      ),
+    );
+    expect(JSON.parse(String(captured.init.body))).toEqual({
+      model: "m",
+      stream: true,
+      messages: [
+        { role: "system", content: "S" },
+        {
+          role: "user",
+          content: [
+            { type: "image_url", image_url: { url: "https://media/a.png" } },
+            { type: "image_url", image_url: { url: "https://media/b.png" } },
+            { type: "text", text: "explain" },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("keeps content a plain string without images, because some compatible servers reject the array form", async () => {
+    const captured = stubFetch(sseResponse(`${chunk("x")}data: [DONE]\n\n`));
+    await collect(
+      createOpenAiCompatibleProvider(OPTIONS).stream(
+        [
+          { role: "system", content: "S" },
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "there", images: [{ url: "https://media/ignored.png" }] },
+        ],
+        new AbortController().signal,
+      ),
+    );
+    expect(JSON.parse(String(captured.init.body)).messages).toEqual([
+      { role: "system", content: "S" },
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "there" },
+    ]);
+  });
 });
 
 describe("anthropic provider", () => {
@@ -144,6 +198,50 @@ describe("anthropic provider", () => {
     expect(JSON.parse(String(captured.init.body))).not.toHaveProperty("system");
   });
 
+  it("puts image blocks before the text block, which is the order Anthropic recommends", async () => {
+    const captured = stubFetch(sseResponse(event("message_stop", {})));
+    await collect(
+      createAnthropicProvider(ANTHROPIC).stream(
+        [{ role: "user", content: "explain", images: [{ url: "https://media/a.png", name: "a.png" }] }],
+        new AbortController().signal,
+      ),
+    );
+    expect(JSON.parse(String(captured.init.body)).messages).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "image", source: { type: "url", url: "https://media/a.png" } },
+          { type: "text", text: "explain" },
+        ],
+      },
+    ]);
+  });
+
+  it("keeps both turns' images when two user turns are merged, instead of dropping the first turn's", async () => {
+    const captured = stubFetch(sseResponse(event("message_stop", {})));
+    await collect(
+      createAnthropicProvider(ANTHROPIC).stream(
+        [
+          { role: "user", content: "context", images: [{ url: "https://media/a.png" }] },
+          { role: "user", content: "question", images: [{ url: "https://media/b.png" }] },
+          { role: "assistant", content: "answer", images: [{ url: "https://media/ignored.png" }] },
+        ],
+        new AbortController().signal,
+      ),
+    );
+    expect(JSON.parse(String(captured.init.body)).messages).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "image", source: { type: "url", url: "https://media/a.png" } },
+          { type: "image", source: { type: "url", url: "https://media/b.png" } },
+          { type: "text", text: "context\n\nquestion" },
+        ],
+      },
+      { role: "assistant", content: "answer" },
+    ]);
+  });
+
   it("throws ProviderStreamError carrying the server's message on an error event", async () => {
     stubFetch(sseResponse(event("error", { error: { type: "overloaded_error", message: "Overloaded" } })));
     const provider = createAnthropicProvider(ANTHROPIC);
@@ -156,5 +254,43 @@ describe("anthropic provider", () => {
     stubFetch(sseResponse(event("content_block_delta", { delta: { type: "text_delta", text: "partial" } })));
     const provider = createAnthropicProvider(ANTHROPIC);
     await expect(collect(provider.stream([], new AbortController().signal))).rejects.toBeInstanceOf(ProviderStreamError);
+  });
+});
+
+// The hint is the only way a user learns why a local text-only model started failing the
+// moment a screenshot appeared in the channel.
+describe("classifyError image hint", () => {
+  it("tells the user about the Send images toggle when the body blames the image", () => {
+    const out = classifyError(new ProviderHttpError(400, '{"error":{"message":"Invalid content type: image_url"}}'), false);
+    expect(out.code).toBe("http");
+    expect(out.message).toContain("Invalid content type: image_url");
+    expect(out.message).toContain('"Send images"');
+  });
+
+  it("stays silent for an unrelated 400 so the advice keeps meaning something", () => {
+    const out = classifyError(new ProviderHttpError(400, '{"error":{"message":"temperature must be <= 2"}}'), false);
+    expect(out.code).toBe("http");
+    expect(out.message).not.toContain("Send images");
+  });
+
+  it("does not hijack a cancelled request whose body happened to mention vision", () => {
+    expect(classifyError(new ProviderHttpError(400, "vision not supported"), true).code).toBe("aborted");
+  });
+
+  it("distinguishes a provider that could not fetch the link from one that refuses images", () => {
+    // Same status, opposite remedy: one means "your model has no vision", the other means
+    // "your server could not reach Discord's CDN". Measured 2026-09-02: those links are
+    // publicly fetchable, so this only happens on a server without internet or one that
+    // never fetches URLs.
+    const fetchFailure = classifyError(
+      new ProviderHttpError(400, '{"error":{"message":"Error while downloading image from url"}}'),
+      false,
+    );
+    expect(fetchFailure.message).toContain("could not fetch the image link");
+    expect(fetchFailure.message).not.toContain("may not accept images");
+
+    const refusal = classifyError(new ProviderHttpError(400, '{"error":{"message":"model does not support vision"}}'), false);
+    expect(refusal.message).toContain("may not accept images");
+    expect(refusal.message).not.toContain("could not fetch the image link");
   });
 });

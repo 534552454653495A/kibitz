@@ -1,0 +1,511 @@
+import { setImmediate as nextTick } from "node:timers/promises";
+import { beforeEach, describe, expect, it, type Mock, vi } from "vitest";
+import { createDesktopRequestHandler, type DesktopRequestHandler, type RequestHandlerDeps } from "../../desktop/request-handler";
+import { byRecency, type ConversationRecord, summarise } from "../../src/core/history";
+import type { ChatMessage } from "../../src/core/messaging";
+import { AUTO_LANGUAGE, type Settings } from "../../src/core/settings";
+import type { DesktopDelivery } from "../../src/shell/desktop-protocol";
+
+// The provider is the network; the handler's contract is what it does around it — including
+// exactly which messages it hands over, which is the only place the image policy is visible.
+const stub = vi.hoisted(() => ({
+  stream: (_messages: ChatMessage[], _signal: AbortSignal): AsyncIterable<string> => (async function* () {})(),
+  created: 0,
+  received: [] as ChatMessage[][],
+}));
+vi.mock("../../src/background/providers/index", () => ({
+  createProvider: () => {
+    stub.created += 1;
+    return {
+      stream: (messages: ChatMessage[], signal: AbortSignal) => {
+        stub.received.push(messages);
+        return stub.stream(messages, signal);
+      },
+    };
+  },
+}));
+
+const SETTINGS: Settings = {
+  provider: "anthropic",
+  baseUrl: "https://example.test",
+  apiKey: "sk-very-secret",
+  model: "m",
+  sendImages: true,
+  language: AUTO_LANGUAGE,
+};
+const MESSAGES: ChatMessage[] = [{ role: "user", content: "hi" }];
+// A shape the panel really sends: the system prompt first, which is what the language
+// policy has to attach to.
+const MESSAGES_WITH_SYSTEM: ChatMessage[] = [
+  { role: "system", content: "rules" },
+  { role: "user", content: "explain" },
+];
+const WITH_IMAGE: ChatMessage[] = [
+  { role: "system", content: "rules" },
+  { role: "user", content: "explain", images: [{ url: "https://cdn.discordapp.test/shot.png", name: "shot.png" }] },
+];
+
+async function* yields(...chunks: string[]): AsyncGenerator<string> {
+  for (const chunk of chunks) yield chunk;
+}
+
+interface Harness {
+  handler: DesktopRequestHandler;
+  deliveries: DesktopDelivery[];
+  /** Resolves when a `done` or `error` delivery for `requestId` has arrived. */
+  terminal(requestId: string): Promise<DesktopDelivery>;
+  /** Resolves when the n-th delivery has arrived. */
+  nth(n: number): Promise<DesktopDelivery>;
+  openOptions: Mock;
+  /** What the handler persisted, standing in for settings.json and ui-state.json. */
+  written: { settings: Settings | null; uiState: Record<string, unknown> };
+  /** Stands in for the history directory; `saveError` makes the next save fail like a full disk. */
+  history: Map<string, ConversationRecord>;
+  saveError: { message: string | null };
+}
+
+function harness(settings: Settings | null): Harness {
+  const deliveries: DesktopDelivery[] = [];
+  const listeners: Array<() => void> = [];
+  const openOptions = vi.fn();
+  const written = { settings, uiState: {} as Record<string, unknown> };
+  const history = new Map<string, ConversationRecord>();
+  const saveError: { message: string | null } = { message: null };
+  const deps: RequestHandlerDeps = {
+    loadSettings: async () => written.settings,
+    saveSettings: async (next) => {
+      written.settings = next;
+    },
+    loadUiState: async () => written.uiState,
+    saveUiState: async (state) => {
+      written.uiState = state;
+    },
+    listConversations: async () => [...history.values()].map(summarise).sort(byRecency),
+    loadConversation: async (id) => history.get(id) ?? null,
+    saveConversation: async (record) => {
+      if (saveError.message !== null) return { ok: false, error: saveError.message };
+      history.set(record.id, record);
+      return { ok: true };
+    },
+    deleteConversation: async (id) => {
+      history.delete(id);
+    },
+    clearConversations: async () => history.clear(),
+    deliver: async (json) => {
+      deliveries.push(JSON.parse(json) as DesktopDelivery);
+      for (const fn of listeners.splice(0)) fn();
+      return true;
+    },
+    openOptions,
+  };
+  const waitFor = (test: () => DesktopDelivery | undefined): Promise<DesktopDelivery> => {
+    const { promise, resolve } = Promise.withResolvers<DesktopDelivery>();
+    const check = (): void => {
+      const hit = test();
+      if (hit !== undefined) resolve(hit);
+      else listeners.push(check);
+    };
+    check();
+    return promise;
+  };
+  return {
+    handler: createDesktopRequestHandler(deps),
+    deliveries,
+    openOptions,
+    written,
+    history,
+    saveError,
+    terminal: (requestId) =>
+      waitFor(() => deliveries.find((d) => d.requestId === requestId && (d.type === "done" || d.type === "error"))),
+    nth: (n) => waitFor(() => deliveries[n - 1]),
+  };
+}
+
+beforeEach(() => {
+  stub.created = 0;
+  stub.stream = () => yields();
+  stub.received = [];
+});
+
+describe("chat", () => {
+  it("replies {ok:true} before any delivery, then delivers delta, delta, done in order", async () => {
+    stub.stream = () => yields("a", "b");
+    const h = harness(SETTINGS);
+    const reply = JSON.parse(await h.handler.handle(JSON.stringify({ type: "chat", requestId: "r1", messages: MESSAGES })));
+    expect(reply).toEqual({ ok: true });
+    expect(h.deliveries).toEqual([]);
+    await h.terminal("r1");
+    expect(h.deliveries).toEqual([
+      { type: "delta", requestId: "r1", text: "a" },
+      { type: "delta", requestId: "r1", text: "b" },
+      { type: "done", requestId: "r1" },
+    ]);
+  });
+
+  it("delivers a no-settings error and never constructs a provider when settings are null", async () => {
+    const h = harness(null);
+    await h.handler.handle(JSON.stringify({ type: "chat", requestId: "r2", messages: MESSAGES }));
+    const end = await h.terminal("r2");
+    expect(end).toMatchObject({ type: "error", requestId: "r2", code: "no-settings" });
+    expect(h.deliveries).toHaveLength(1);
+    expect(stub.created).toBe(0);
+  });
+
+  it("cancel aborts the provider signal and ends the stream with an aborted error", async () => {
+    stub.stream = (_messages, signal) =>
+      (async function* () {
+        yield "first";
+        const { promise, resolve } = Promise.withResolvers<void>();
+        signal.addEventListener("abort", () => resolve(), { once: true });
+        await promise;
+        yield "never delivered";
+      })();
+    const h = harness(SETTINGS);
+    await h.handler.handle(JSON.stringify({ type: "chat", requestId: "r3", messages: MESSAGES }));
+    await h.nth(1);
+    const cancelReply = JSON.parse(await h.handler.handle(JSON.stringify({ type: "cancel", requestId: "r3" })));
+    expect(cancelReply).toEqual({ ok: true });
+    const end = await h.terminal("r3");
+    expect(end).toMatchObject({ type: "error", requestId: "r3", code: "aborted" });
+    expect(h.deliveries.filter((d) => d.type === "delta").map((d) => d.text)).toEqual(["first"]);
+  });
+
+  it("maps a provider throw to a classified error delivery instead of rejecting the call", async () => {
+    stub.stream = () =>
+      (async function* () {
+        yield "partial";
+        throw new TypeError("fetch failed");
+      })();
+    const h = harness(SETTINGS);
+    await h.handler.handle(JSON.stringify({ type: "chat", requestId: "r4", messages: MESSAGES }));
+    const end = await h.terminal("r4");
+    expect(end).toMatchObject({ type: "error", requestId: "r4", code: "network" });
+  });
+
+  it("abortAll cancels every in-flight stream", async () => {
+    stub.stream = (_messages, signal) =>
+      (async function* () {
+        const { promise, resolve } = Promise.withResolvers<void>();
+        signal.addEventListener("abort", () => resolve(), { once: true });
+        await promise;
+      })();
+    const h = harness(SETTINGS);
+    await h.handler.handle(JSON.stringify({ type: "chat", requestId: "a", messages: MESSAGES }));
+    await h.handler.handle(JSON.stringify({ type: "chat", requestId: "b", messages: MESSAGES }));
+    // Both streams must be past loadSettings and parked on the signal before abortAll runs.
+    await nextTick();
+    h.handler.abortAll();
+    const ends = await Promise.all([h.terminal("a"), h.terminal("b")]);
+    expect(ends.map((d) => d.type === "error" && d.code)).toEqual(["aborted", "aborted"]);
+  });
+
+  // Failure mode defended: the companion re-reads settings on every chat, so it is the last
+  // place that can honour the toggle. If it forwarded `images` anyway, unticking the box in
+  // the panel would change nothing and a Discord CDN link would still reach the provider.
+  it("hands the provider no images at all when sendImages is off", async () => {
+    const h = harness({ ...SETTINGS, sendImages: false });
+    await h.handler.handle(JSON.stringify({ type: "chat", requestId: "i1", messages: WITH_IMAGE }));
+    await h.terminal("i1");
+    expect(stub.received[0]).toEqual([
+      { role: "system", content: "rules" },
+      { role: "user", content: "explain" },
+    ]);
+  });
+
+  it("hands the provider the images unchanged when sendImages is on", async () => {
+    const h = harness(SETTINGS);
+    await h.handler.handle(JSON.stringify({ type: "chat", requestId: "i2", messages: WITH_IMAGE }));
+    await h.terminal("i2");
+    expect(stub.received[0]).toEqual(WITH_IMAGE);
+  });
+
+  // Failure mode defended: this is the host the owner actually runs. The panel never sees
+  // `Settings`, so if the companion does not attach the instruction on the way out, the
+  // language the user picked reaches nothing and the setting is decoration.
+  it("names the configured language in the system message it hands the provider", async () => {
+    const h = harness({ ...SETTINGS, language: "Türkçe" });
+    await h.handler.handle(JSON.stringify({ type: "chat", requestId: "l1", messages: MESSAGES_WITH_SYSTEM }));
+    await h.terminal("l1");
+    const sent = stub.received[0];
+    expect(sent?.[0]?.role).toBe("system");
+    expect(sent?.[0]?.content).toContain("Türkçe");
+    // Appended, not substituted: the prompt's own rules must survive.
+    expect(sent?.[0]?.content.startsWith("rules")).toBe(true);
+    expect(sent?.slice(1)).toEqual(MESSAGES_WITH_SYSTEM.slice(1));
+  });
+
+  it("hands the conversation over untouched on auto, so the default costs no extra words", async () => {
+    const h = harness({ ...SETTINGS, language: AUTO_LANGUAGE });
+    await h.handler.handle(JSON.stringify({ type: "chat", requestId: "l2", messages: MESSAGES_WITH_SYSTEM }));
+    await h.terminal("l2");
+    expect(stub.received[0]).toEqual(MESSAGES_WITH_SYSTEM);
+  });
+});
+
+describe("control requests", () => {
+  it("settings-status reports provider and model but never the key", async () => {
+    const h = harness(SETTINGS);
+    const json = await h.handler.handle(JSON.stringify({ type: "settings-status" }));
+    expect(JSON.parse(json)).toEqual({ configured: true, provider: "anthropic", model: "m" });
+    expect(json).not.toContain(SETTINGS.apiKey);
+  });
+
+  it("settings-status is {configured:false} without settings", async () => {
+    const h = harness(null);
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "settings-status" })))).toEqual({ configured: false });
+  });
+
+  it("open-options invokes the companion's instructions hook and acknowledges", async () => {
+    const h = harness(SETTINGS);
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "open-options" })))).toEqual({ ok: true });
+    expect(h.openOptions).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("settings requests", () => {
+  it("load-settings hands back the draft with hasKey instead of the key itself", async () => {
+    const h = harness(SETTINGS);
+    const json = await h.handler.handle(JSON.stringify({ type: "load-settings" }));
+    expect(JSON.parse(json)).toEqual({
+      draft: {
+        provider: "anthropic",
+        baseUrl: "https://example.test",
+        model: "m",
+        hasKey: true,
+        sendImages: true,
+        language: AUTO_LANGUAGE,
+      },
+    });
+    expect(json).not.toContain(SETTINGS.apiKey);
+  });
+
+  it("load-settings answers {draft:null} before the wizard has run", async () => {
+    const h = harness(null);
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "load-settings" })))).toEqual({ draft: null });
+  });
+
+  it("save-settings with an empty key keeps the stored one instead of wiping it", async () => {
+    const h = harness(SETTINGS);
+    const input = { provider: "anthropic", baseUrl: "https://example.test", model: "claude-next", apiKey: "" };
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-settings", input })))).toEqual({ ok: true });
+    expect(h.written.settings).toEqual({ ...SETTINGS, model: "claude-next" });
+  });
+
+  it("save-settings writes sendImages:false through to settings.json", async () => {
+    const h = harness(SETTINGS);
+    const input = { provider: "anthropic", baseUrl: "https://example.test", model: "m", apiKey: "", sendImages: false };
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-settings", input })))).toEqual({ ok: true });
+    expect(h.written.settings).toEqual({ ...SETTINGS, sendImages: false });
+  });
+
+  it("load-settings reports a stored language, still without the key", async () => {
+    const h = harness({ ...SETTINGS, language: "Türkçe" });
+    const json = await h.handler.handle(JSON.stringify({ type: "load-settings" }));
+    expect(JSON.parse(json)).toMatchObject({ draft: { language: "Türkçe", hasKey: true } });
+    expect(json).not.toContain(SETTINGS.apiKey);
+  });
+
+  it("save-settings writes a language through to settings.json", async () => {
+    const h = harness(SETTINGS);
+    const input = { provider: "anthropic", baseUrl: "https://example.test", model: "m", apiKey: "", language: "Türkçe" };
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-settings", input })))).toEqual({ ok: true });
+    expect(h.written.settings).toEqual({ ...SETTINGS, language: "Türkçe" });
+  });
+
+  // A renderer bundle from before the picker sends no `language`; reading that silence as
+  // "auto" would reset a language the wizard or the options page had configured.
+  it("save-settings that omits language keeps the stored one instead of resetting it to auto", async () => {
+    const h = harness({ ...SETTINGS, language: "Türkçe" });
+    const input = { provider: "anthropic", baseUrl: "https://example.test", model: "claude-next", apiKey: "" };
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-settings", input })))).toEqual({ ok: true });
+    expect(h.written.settings).toEqual({ ...SETTINGS, model: "claude-next", language: "Türkçe" });
+  });
+
+  it("save-settings refuses and writes nothing when neither a typed nor a stored key exists", async () => {
+    const h = harness(null);
+    const input = { provider: "anthropic", baseUrl: "https://example.test", model: "m", apiKey: "" };
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-settings", input })))).toEqual({
+      ok: false,
+      error: "An API key is required.",
+    });
+    expect(h.written.settings).toBeNull();
+  });
+
+  it("save-settings rejects a base URL the provider client could not use", async () => {
+    const h = harness(SETTINGS);
+    const input = { provider: "anthropic", baseUrl: "ftp://example.test", model: "m", apiKey: "sk-new" };
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-settings", input })))).toEqual({
+      ok: false,
+      error: "Base URL must be a full http(s) URL, for example https://api.openai.com/v1.",
+    });
+    expect(h.written.settings).toEqual(SETTINGS);
+  });
+
+  it("answers {ok:false} to a save-settings whose input is not a full draft", async () => {
+    const h = harness(SETTINGS);
+    const json = await h.handler.handle(JSON.stringify({ type: "save-settings", input: { provider: "anthropic" } }));
+    expect(JSON.parse(json)).toMatchObject({ ok: false });
+    expect(h.written.settings).toEqual(SETTINGS);
+  });
+
+  it("request-access is granted: a Node process needs no host permission", async () => {
+    const h = harness(SETTINGS);
+    const json = await h.handler.handle(JSON.stringify({ type: "request-access", origin: "https://example.test/*" }));
+    expect(JSON.parse(json)).toEqual({ granted: true });
+  });
+});
+
+describe("ui state requests", () => {
+  it("round-trips the panel's layout blob through the companion", async () => {
+    const h = harness(SETTINGS);
+    const state = { panelLayout: { mode: "left", size: 360 }, view: "chat" };
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-ui-state", state })))).toEqual({ ok: true });
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "load-ui-state" })))).toEqual({ state });
+  });
+
+  it("answers {ok:false} to a save-ui-state carrying a non-object state", async () => {
+    const h = harness(SETTINGS);
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-ui-state", state: "left" })))).toMatchObject({ ok: false });
+    expect(h.written.uiState).toEqual({});
+  });
+});
+
+describe("history requests", () => {
+  const RECORD = {
+    id: "1767225600000-abc",
+    platform: "discord",
+    channelId: "c1",
+    title: "Spider-Man ISO isteği",
+    participants: [{ id: "u1", name: "Yunus" }],
+    messages: [
+      {
+        platform: "discord",
+        id: "1000000000000000001",
+        channel: { id: "c1" },
+        author: { id: "u1", name: "Yunus", isBot: false },
+        content: "Spider man 2 Türkçe iso",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        attachments: [],
+        embeds: [],
+        reactions: [],
+        mentions: [],
+        isSystem: false,
+      },
+    ],
+    turns: [{ role: "assistant", text: "Yunus bir ISO dosyası arıyor." }],
+    history: [{ role: "user", content: "explain" }],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:05:00.000Z",
+  };
+
+  it("saves a conversation, then lists it as a summary with no transcript in it", async () => {
+    const h = harness(SETTINGS);
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-conversation", record: RECORD })))).toEqual({ ok: true });
+
+    const listed = JSON.parse(await h.handler.handle(JSON.stringify({ type: "list-conversations" })));
+    expect(listed).toEqual({
+      conversations: [
+        {
+          id: RECORD.id,
+          platform: "discord",
+          channelId: "c1",
+          title: "Spider-Man ISO isteği",
+          participants: [{ id: "u1", name: "Yunus" }],
+          messageCount: 1,
+          excerpt: "Spider man 2 Türkçe iso",
+          createdAt: RECORD.createdAt,
+          updatedAt: RECORD.updatedAt,
+        },
+      ],
+    });
+  });
+
+  it("loads a saved conversation back whole, and answers null for an unknown id", async () => {
+    const h = harness(SETTINGS);
+    await h.handler.handle(JSON.stringify({ type: "save-conversation", record: RECORD }));
+
+    const loaded = JSON.parse(await h.handler.handle(JSON.stringify({ type: "load-conversation", id: RECORD.id })));
+    expect(loaded).toMatchObject({ conversation: { id: RECORD.id, turns: RECORD.turns, history: RECORD.history } });
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "load-conversation", id: "nope" })))).toEqual({ conversation: null });
+  });
+
+  it("deletes one conversation and clears the rest without touching the settings", async () => {
+    const h = harness(SETTINGS);
+    await h.handler.handle(JSON.stringify({ type: "save-conversation", record: RECORD }));
+    await h.handler.handle(JSON.stringify({ type: "save-conversation", record: { ...RECORD, id: "1767225600000-two" } }));
+
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "delete-conversation", id: RECORD.id })))).toEqual({ ok: true });
+    expect([...h.history.keys()]).toEqual(["1767225600000-two"]);
+
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "clear-conversations" })))).toEqual({ ok: true });
+    expect(h.history.size).toBe(0);
+    expect(h.written.settings).toEqual(SETTINGS);
+  });
+
+  it("reports a failed save in words instead of throwing across the binding", async () => {
+    const h = harness(SETTINGS);
+    h.saveError.message = "Could not save this conversation to /tmp/history/x.json: ENOSPC";
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-conversation", record: RECORD })))).toEqual({
+      ok: false,
+      error: "Could not save this conversation to /tmp/history/x.json: ENOSPC",
+    });
+    expect(h.history.size).toBe(0);
+  });
+
+  it("refuses a save-conversation whose record is not a conversation, so nothing unreadable is stored", async () => {
+    const h = harness(SETTINGS);
+    const reply = await h.handler.handle(JSON.stringify({ type: "save-conversation", record: { id: "x", messages: [] } }));
+    expect(JSON.parse(reply)).toMatchObject({ ok: false });
+    expect(h.history.size).toBe(0);
+  });
+
+  it("refuses a load-conversation without an id", async () => {
+    const h = harness(SETTINGS);
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "load-conversation" })))).toMatchObject({ ok: false });
+  });
+});
+
+describe("malformed input", () => {
+  it("answers {ok:false} to non-JSON instead of throwing across the CDP binding", async () => {
+    const h = harness(SETTINGS);
+    expect(JSON.parse(await h.handler.handle("{not json"))).toMatchObject({ ok: false, error: expect.any(String) });
+  });
+
+  it("answers {ok:false} to a chat without requestId and starts no stream", async () => {
+    const h = harness(SETTINGS);
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "chat", messages: MESSAGES })))).toMatchObject({ ok: false });
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ type: "reboot" })))).toMatchObject({ ok: false });
+    expect(stub.created).toBe(0);
+  });
+});
+
+// Failure mode defended, and it cost an hour: the companion is a Node process that loads its
+// code at start. The bundle watcher re-arms the RENDERER, never this process, so after pulling
+// a new version the panel can speak a protocol the running companion has never heard of. It
+// answered "malformed request", which reads like a bug in the panel.
+describe("version skew", () => {
+  it("names the unknown request type and says to restart, instead of 'malformed request'", async () => {
+    const h = harness(SETTINGS);
+    const reply: unknown = JSON.parse(await h.handler.handle(JSON.stringify({ type: "summon-a-dragon" })));
+    expect(reply).toEqual({
+      ok: false,
+      error: expect.stringContaining('does not understand "summon-a-dragon"'),
+    });
+    expect(reply).toMatchObject({ error: expect.stringContaining("npm run desktop") });
+  });
+
+  it("blames the payload, not the companion's age, for a type this build DOES handle", async () => {
+    // The trap: `parseRequest` returns null for both failures. Telling the user to restart
+    // when the type is known would point them at the wrong half of the system - the mistake
+    // that cost an hour when a stale companion refused every history request.
+    const h = harness(SETTINGS);
+    const reply: unknown = JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-conversation", record: { id: "" } })));
+    expect(reply).toMatchObject({ ok: false, error: expect.stringContaining('"save-conversation" was refused') });
+    expect(JSON.stringify(reply)).not.toContain("npm run desktop");
+  });
+
+  it("still says 'malformed request' for something with no type at all", async () => {
+    const h = harness(SETTINGS);
+    expect(JSON.parse(await h.handler.handle(JSON.stringify({ nope: 1 })))).toEqual({ ok: false, error: "malformed request" });
+  });
+});

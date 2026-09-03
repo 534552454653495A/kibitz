@@ -178,6 +178,71 @@ export interface RawDiscordChannel {
 }
 
 /**
+ * Attachment → the URL we hand to a vision model.
+ *
+ * Discord serves uploads from `cdn.discordapp.com` and mirrors the same path on
+ * `media.discordapp.net`, which re-encodes and resizes on demand through the
+ * `format`/`width`/`height` query parameters. That is exactly what Discord's own web and
+ * desktop clients request for every inline preview, which is why it is expected to stay:
+ * it is public, documented CDN behaviour that every client depends on, not an internal
+ * detail. The point for us is money — a 4000×3000 phone photo costs the user several times
+ * the tokens of the same picture bounded to 1024px, and no explanation needs the full one.
+ *
+ * `width`/`height` are a bounding box: the proxy preserves the aspect ratio and only ever
+ * scales down, so passing a square box yields "longest edge ≤ 1024".
+ *
+ * The signature parameters Discord appends to modern attachment links (`ex`, `is`, `hm`)
+ * MUST survive: an unsigned CDN link is a 404, and the model would then be told about an
+ * image it cannot fetch. Hence "copy the query, add ours" rather than building a URL.
+ *
+ * The probe cannot verify this (2026-09-02): `probe/fixtures/discord-like.html` serves no
+ * real attachments and a live probe would have to fetch a signed link from a throwaway
+ * account's channel. It is verified by unit tests over URL strings instead — the rule is a
+ * pure string transformation, so that covers everything except Discord retiring the proxy.
+ */
+export interface ImagePreviewRule {
+  host: string;
+  maxEdge: number;
+  params: Record<string, string>;
+}
+
+const PREVIEW_MAX_EDGE = 1024;
+
+export const IMAGE_PREVIEW: ImagePreviewRule = {
+  host: "media.discordapp.net",
+  maxEdge: PREVIEW_MAX_EDGE,
+  // webp is what the client asks for and both vision APIs we target accept it.
+  params: { format: "webp", width: String(PREVIEW_MAX_EDGE), height: String(PREVIEW_MAX_EDGE) },
+};
+
+/** Hosts whose path the proxy mirrors 1:1. Any other origin is not ours to rewrite. */
+const PREVIEW_SOURCE_HOSTS = ["cdn.discordapp.com", "media.discordapp.net"];
+
+function toPreviewUrl(candidate: string | undefined): string | undefined {
+  if (candidate === undefined || candidate === "") return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    return undefined;
+  }
+  // https only: the proxy is https, and rewriting anything else would invent a URL.
+  if (parsed.protocol !== "https:" || !PREVIEW_SOURCE_HOSTS.includes(parsed.hostname)) return undefined;
+  parsed.hostname = IMAGE_PREVIEW.host;
+  for (const [key, value] of Object.entries(IMAGE_PREVIEW.params)) parsed.searchParams.set(key, value);
+  return parsed.toString();
+}
+
+/**
+ * `proxy_url` first — it is Discord's own mirror of the attachment — then the raw `url`.
+ * Returns undefined when neither is a Discord CDN link we know how to resize; the caller
+ * then sends the original URL, which is correct, just larger.
+ */
+export function previewUrlFor(rawUrl: string, proxyUrl: string | undefined): string | undefined {
+  return toPreviewUrl(proxyUrl) ?? toPreviewUrl(rawUrl);
+}
+
+/**
  * The scrollable ancestor of the message list. Found by computed style rather than by a
  * selector: Discord's scroller element carries only hashed classes. Walks up from the
  * list root until it meets an element that actually scrolls vertically.

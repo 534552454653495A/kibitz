@@ -29,6 +29,9 @@ export interface UniversalAttachment {
   kind: AttachmentKind;
   name: string;
   url: string;
+  /** A URL better suited to a vision model than `url` when the platform offers one
+   *  (Discord's media proxy re-encodes and resizes). Core never inspects why. */
+  previewUrl?: string;
   mimeType?: string;
   sizeBytes?: number;
 }

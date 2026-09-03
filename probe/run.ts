@@ -14,13 +14,21 @@
  *   discord.com channel URL via request interception, so the SAME extension bundle and
  *   the SAME checks run without an account. It proves Kibitz matches the contract it wrote
  *   down; only the live run proves Discord still does.
+ * - `--shell desktop` (`npm run probe:selftest:desktop`) runs the fixture with NO extension
+ *   loaded: dist/desktop-renderer.js is injected over CDP exactly as the desktop companion
+ *   does it, with an in-process request handler that has no settings. Same checks, so a
+ *   green run proves the desktop bundle carries bridge + injector + panel end to end.
+ *   Live Discord under the desktop shell is `npm run desktop`'s job, not the probe's.
  */
 import * as esbuild from "esbuild";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
 import puppeteer, { type Browser, type Page } from "puppeteer";
-import { HOSTS } from "../src/adapters/discord/selectors";
+import { attachKibitz, deliver } from "../desktop/inject";
+import { createDesktopRequestHandler } from "../desktop/request-handler";
+import { HOSTS, parseChannelPath } from "../src/adapters/discord/selectors";
+import { byRecency, type ConversationRecord, summarise } from "../src/core/history";
 import { LOG_PREFIX } from "../src/shared/log";
 import { CHECKS, ProbeSessionError, type ProbeContext } from "./checks";
 import { installDiscordToken } from "./discord-session";
@@ -34,12 +42,17 @@ const HOST_BY_BRANCH: Record<Branch, (typeof HOSTS)[number]> = {
   ptb: "ptb.discord.com",
 };
 
+type ShellKind = "extension" | "desktop";
+
 /** Snowflake-shaped ids for fixture mode; the fixture page reads them back from the URL. */
 const FIXTURE_CHANNEL = { guildId: "100000000000000001", channelId: "100000000000000002" } as const;
+const DESKTOP_BUNDLE = "desktop-renderer.js";
 
 interface ProbeConfig {
-  /** "fixture" in self-test mode; the report and the output dir are labelled with it. */
-  branch: Branch | "fixture";
+  /** "fixture" / "fixture-desktop" in self-test mode; the report and the output dir are labelled with it. */
+  branch: Branch | "fixture" | "fixture-desktop";
+  /** Which host runtime the page gets: the unpacked extension, or the CDP-injected desktop bundle. */
+  shell: ShellKind;
   host: string;
   /** null in fixture mode: no login happens. */
   token: string | null;
@@ -64,11 +77,18 @@ function fail(message: string): never {
 }
 
 async function readConfig(): Promise<ProbeConfig> {
-  const { values } = parseArgs({ options: { branch: { type: "string" }, fixture: { type: "string" } }, strict: false });
+  const { values } = parseArgs({
+    options: { branch: { type: "string" }, fixture: { type: "string" }, shell: { type: "string" } },
+    strict: false,
+  });
   const branchArg = typeof values.branch === "string" ? values.branch : (process.env.DISCORD_BRANCH ?? "stable");
   if (!(branchArg in HOST_BY_BRANCH)) fail(`--branch must be one of ${Object.keys(HOST_BY_BRANCH).join("|")}, got "${branchArg}"`);
   const branch = branchArg as Branch;
   const fixture = typeof values.fixture === "string" ? path.resolve(root, values.fixture) : null;
+  const shellArg = typeof values.shell === "string" ? values.shell : "extension";
+  if (shellArg !== "extension" && shellArg !== "desktop") fail(`--shell must be extension|desktop, got "${shellArg}"`);
+  const shell: ShellKind = shellArg;
+  if (shell === "desktop" && !fixture) fail("--shell desktop is fixture-only here; for live Discord use `npm run desktop`");
 
   const distDir = path.resolve(root, process.env.KIBITZ_DIST ?? "dist");
   try {
@@ -77,19 +97,29 @@ async function readConfig(): Promise<ProbeConfig> {
     fail(`${path.relative(root, distDir)}/manifest.json not found — run \`npm run build\` first (or set KIBITZ_DIST)`);
   }
 
+  if (shell === "desktop") {
+    try {
+      await fs.access(path.join(distDir, DESKTOP_BUNDLE));
+    } catch {
+      fail(`${path.relative(root, distDir)}/${DESKTOP_BUNDLE} not found — run \`npm run build\` first (or set KIBITZ_DIST)`);
+    }
+  }
+
   if (fixture) {
     try {
       await fs.access(fixture);
     } catch {
       fail(`fixture not found: ${fixture}`);
     }
+    const branchLabel = shell === "desktop" ? "fixture-desktop" : "fixture";
     return {
-      branch: "fixture",
+      branch: branchLabel,
+      shell,
       host: HOST_BY_BRANCH.stable,
       token: null,
       fixture,
       ...FIXTURE_CHANNEL,
-      outDir: path.resolve(root, process.env.PROBE_OUT ?? path.join("probe-out", "fixture")),
+      outDir: path.resolve(root, process.env.PROBE_OUT ?? path.join("probe-out", branchLabel)),
       distDir,
     };
   }
@@ -102,6 +132,7 @@ async function readConfig(): Promise<ProbeConfig> {
 
   return {
     branch,
+    shell,
     host: HOST_BY_BRANCH[branch],
     token,
     fixture: null,
@@ -129,6 +160,43 @@ async function serveFixture(page: Page, url: string, fixturePath: string): Promi
   });
 }
 
+/**
+ * Desktop fixture mode: what desktop/companion.ts does to a real Discord window, minus
+ * persistence — `loadSettings` yields null so the panel takes the not-configured path and
+ * no provider is ever constructed, and the writing deps are in-memory so a probe run never
+ * touches the developer's real settings.json. Attached before navigation, so the bundle
+ * reaches the fixture document through evaluateOnNewDocument like it reaches a reloaded
+ * Discord.
+ */
+async function attachDesktopBundle(page: Page, distDir: string): Promise<void> {
+  const bundle = await fs.readFile(path.join(distDir, DESKTOP_BUNDLE), "utf8");
+  let uiState: Record<string, unknown> = {};
+  // Same reason as `uiState`: in-memory, so a probe run never writes into the developer's
+  // real history directory, and the panel still gets a working list to render.
+  const conversations = new Map<string, ConversationRecord>();
+  const handler = createDesktopRequestHandler({
+    loadSettings: async () => null,
+    saveSettings: async () => {},
+    loadUiState: async () => uiState,
+    saveUiState: async (state) => {
+      uiState = state;
+    },
+    listConversations: async () => [...conversations.values()].map((record) => summarise(record)).sort(byRecency),
+    loadConversation: async (id) => conversations.get(id) ?? null,
+    saveConversation: async (record) => {
+      conversations.set(record.id, record);
+      return { ok: true };
+    },
+    deleteConversation: async (id) => {
+      conversations.delete(id);
+    },
+    clearConversations: async () => conversations.clear(),
+    deliver: (json) => deliver(page, json),
+    openOptions: () => {},
+  });
+  await attachKibitz(page, { bundle, onRequest: handler.handle });
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   const { promise: timeout, reject } = Promise.withResolvers<never>();
   const timer = setTimeout(() => reject(new Error(`${label} exceeded ${ms}ms`)), ms);
@@ -151,6 +219,16 @@ async function bundleHelper(): Promise<string> {
   return file.text;
 }
 
+/**
+ * Runs the checks in order and stops at the first failure.
+ *
+ * Classification happens HERE, in one place, for every check including the ones that fail
+ * inside `until()` on a timeout: if the view is no longer on the configured channel, the
+ * missing elements have a cause no selector fix can address (another client navigated, a
+ * redirect, a rejected token), so the failure is a `session` one and the fix agent is never
+ * started. Measured while sharing a developer's own Discord (2026-09-02): the channel moved
+ * mid-run twice, and a per-check guard missed the checks whose throw came from `until()`.
+ */
 async function runChecks(ctx: ProbeContext, results: CheckResult[]): Promise<FailureKind> {
   for (const check of CHECKS) {
     const started = Date.now();
@@ -160,13 +238,38 @@ async function runChecks(ctx: ProbeContext, results: CheckResult[]): Promise<Fai
       console.log(`  ✅ ${check.id}: ${detail}`);
     } catch (e: unknown) {
       const err = e instanceof Error ? e : new Error(String(e));
-      const detail = `${err.name}: ${err.message}`;
+      const where = await viewLocation(ctx);
+      const suffix =
+        where === "elsewhere"
+          ? ` (the view had left channel ${ctx.channelId})`
+          : where === "unreachable"
+            ? " (the page could not be asked where it was)"
+            : "";
+      const detail = `${err.name}: ${err.message}${suffix}`;
       results.push({ id: check.id, description: check.description, ok: false, ms: Date.now() - started, detail });
       console.log(`  ❌ ${check.id}: ${detail}`);
-      return err instanceof ProbeSessionError ? "session" : "contract";
+      if (where === "unreachable") return "setup";
+      if (err instanceof ProbeSessionError || where === "elsewhere") return "session";
+      return "contract";
     }
   }
   return "none";
+}
+
+/**
+ * Where the view is, as far as classification cares. A page that cannot be asked is not
+ * evidence of a contract break either — it is a dead browser, which is what `setup` means;
+ * the check's own failure detail is already in the report, so nothing is lost.
+ */
+type ViewLocation = "on-channel" | "elsewhere" | "unreachable";
+
+async function viewLocation(ctx: ProbeContext): Promise<ViewLocation> {
+  try {
+    const pathname = await withTimeout(ctx.page.evaluate(() => location.pathname), 5_000, "location check");
+    return parseChannelPath(pathname)?.channelId === ctx.channelId ? "on-channel" : "elsewhere";
+  } catch {
+    return "unreachable";
+  }
 }
 
 /** Best effort, each bounded: a page that hung the checks may hang these too. */
@@ -211,7 +314,7 @@ async function main(): Promise<number> {
       (async () => {
         session.browser = await puppeteer.launch({
           headless: true,
-          enableExtensions: [config.distDir],
+          ...(config.shell === "extension" ? { enableExtensions: [config.distDir] } : {}),
           args: ["--no-sandbox", "--disable-dev-shm-usage"],
           defaultViewport: { width: 1400, height: 1000 },
         });
@@ -229,6 +332,7 @@ async function main(): Promise<number> {
 
         if (config.fixture) await serveFixture(page, url, config.fixture);
         else if (config.token) await installDiscordToken(page, config.token);
+        if (config.shell === "desktop") await attachDesktopBundle(page, config.distDir);
         await page.goto(url, { waitUntil: "domcontentloaded", timeout: NAVIGATION_TIMEOUT_MS });
         const helperCode = await bundleHelper();
         await page.evaluate(`${helperCode}\nKibitzProbeHelper.installProbeHelper();`);

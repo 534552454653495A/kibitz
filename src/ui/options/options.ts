@@ -1,11 +1,14 @@
 /**
- * Options page logic: provider/base URL/key/model form, host-permission grant, and a
- * "Test" round-trip through the real chat Port.
+ * Options page logic: provider/base URL/key/model/image-policy form, host-permission grant,
+ * and a "Test" round-trip through the real chat Port. Also the extension's grant surface:
+ * opened as `options.html?grant=<pattern>` it shows one button and nothing else.
  *
- * The one non-obvious decision is in the save handler: `permissions.request` is called
+ * The one non-obvious decision is in both grant paths: `permissions.request` is called
  * synchronously, before the first `await`, because Chrome only honours the request while
  * a user gesture is active and an intervening await can end that gesture — the prompt
- * then silently never appears and every later chat fails with "no-permission".
+ * then silently never appears and every later chat fails with "no-permission". That is
+ * also why the panel cannot ask for itself: a content script has no permissions API and
+ * the service worker has no gesture, so the request has to happen on a page like this one.
  * The key is never logged, never echoed into the status line, and never sent anywhere
  * but chrome.storage.local.
  */
@@ -13,13 +16,16 @@ import { CHAT_PORT_NAME, type PortResponse } from "../../core/messaging";
 import { ext } from "../../shared/ext";
 import { log } from "../../shared/log";
 import {
-  loadSettings,
+  AUTO_LANGUAGE,
+  LANGUAGE_PRESETS,
+  normalizeLanguage,
   originPattern,
+  PROVIDER_IDS,
   PROVIDER_PRESETS,
-  saveSettings,
   type ProviderId,
   type Settings,
-} from "../../shared/settings";
+} from "../../core/settings";
+import { loadSettings, saveSettings } from "../../shared/settings";
 
 function requireElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -34,18 +40,50 @@ const els = {
   baseUrl: requireElement<HTMLInputElement>("base-url"),
   apiKey: requireElement<HTMLInputElement>("api-key"),
   model: requireElement<HTMLInputElement>("model"),
+  language: requireElement<HTMLSelectElement>("language"),
+  languageOther: requireElement<HTMLInputElement>("language-other"),
+  sendImages: requireElement<HTMLInputElement>("send-images"),
   save: requireElement<HTMLButtonElement>("save"),
   test: requireElement<HTMLButtonElement>("test"),
   permission: requireElement<HTMLSpanElement>("permission"),
   status: requireElement<HTMLParagraphElement>("status"),
   testOutput: requireElement<HTMLPreElement>("test-output"),
+  settingsView: requireElement<HTMLElement>("settings-view"),
+  grantView: requireElement<HTMLElement>("grant-view"),
+  grantOrigin: requireElement<HTMLParagraphElement>("grant-origin"),
+  grant: requireElement<HTMLButtonElement>("grant"),
+  grantStatus: requireElement<HTMLParagraphElement>("grant-status"),
 };
 
-const PROVIDER_IDS = Object.keys(PROVIDER_PRESETS) as ProviderId[];
+/**
+ * The `<select>` value standing for "not in the list". UI-local and never persisted: it is
+ * deliberately not a shape `normalizeLanguage` could produce from real typing, so it can
+ * never collide with a label a user genuinely wants (someone may well type "other").
+ */
+const OTHER_LANGUAGE = "__other__";
 
 function selectedProvider(): ProviderId {
   const value = els.provider.value;
   return PROVIDER_IDS.includes(value as ProviderId) ? (value as ProviderId) : PROVIDER_IDS[0]!;
+}
+
+/** The picker read as a `Settings.language`; the free-form box wins once "Other…" is chosen. */
+function selectedLanguage(): string {
+  const picked = els.language.value;
+  return normalizeLanguage(picked === OTHER_LANGUAGE ? els.languageOther.value : picked);
+}
+
+/**
+ * Seeds the picker from a stored label. A label that is neither `auto` nor one of the
+ * presets was typed by hand (here, in the panel, or by `desktop -- setup`), so it must come
+ * back as "Other…" with the text filled in — showing "Auto" over it would silently discard
+ * the user's language the next time they saved any other field.
+ */
+function applyLanguage(language: string): void {
+  const listed = language === AUTO_LANGUAGE || LANGUAGE_PRESETS.includes(language);
+  els.language.value = listed ? language : OTHER_LANGUAGE;
+  els.languageOther.value = listed ? "" : language;
+  els.languageOther.hidden = listed;
 }
 
 function setStatus(text: string, kind: "info" | "ok" | "error" = "info"): void {
@@ -106,7 +144,17 @@ function readForm(): { settings: Settings; pattern: string } | null {
     els.model.focus();
     return null;
   }
-  return { settings: { provider: selectedProvider(), baseUrl, apiKey, model }, pattern };
+  return {
+    settings: {
+      provider: selectedProvider(),
+      baseUrl,
+      apiKey,
+      model,
+      sendImages: els.sendImages.checked,
+      language: selectedLanguage(),
+    },
+    pattern,
+  };
 }
 
 function onSave(event: SubmitEvent): void {
@@ -169,12 +217,66 @@ function onTest(): void {
   port.postMessage({ type: "chat", requestId, messages: [{ role: "user", content: "Reply with the single word OK." }] });
 }
 
+/**
+ * Grant mode: one sentence, one button, then the window closes itself. The pattern comes
+ * from the URL the background built, and is re-parsed here so a hand-edited link cannot
+ * make us request an origin the user never configured.
+ */
+function initGrant(requested: string): void {
+  let pattern: string;
+  try {
+    pattern = originPattern(requested.endsWith("/*") ? requested.slice(0, -2) : requested);
+  } catch {
+    els.grantOrigin.textContent = requested;
+    els.grantStatus.textContent = "That is not an address Kibitz can ask for. Reopen the settings and check the base URL.";
+    els.grantStatus.dataset.kind = "error";
+    els.grant.disabled = true;
+    return;
+  }
+  els.grantOrigin.textContent = pattern;
+  els.grant.addEventListener("click", () => {
+    // Must run before any await: see the file header for why.
+    const grant = ext.permissions.request({ origins: [pattern] });
+    els.grant.disabled = true;
+    void grant.then(
+      (granted) => {
+        if (granted) {
+          window.close();
+          return;
+        }
+        els.grant.disabled = false;
+        els.grantStatus.textContent = "Chrome did not grant access. Kibitz cannot reach the API until it does.";
+        els.grantStatus.dataset.kind = "error";
+      },
+      (err: unknown) => {
+        els.grant.disabled = false;
+        els.grantStatus.textContent = `Requesting access failed: ${err instanceof Error ? err.message : String(err)}`;
+        els.grantStatus.dataset.kind = "error";
+      },
+    );
+  });
+}
+
 async function init(): Promise<void> {
   for (const id of PROVIDER_IDS) {
     const option = document.createElement("option");
     option.value = id;
     option.textContent = PROVIDER_PRESETS[id].label;
     els.provider.append(option);
+  }
+
+  // Auto first (it is the default), the presets as spelling help, and "Other…" last for a
+  // language the list does not carry — `language` accepts any label, not just these.
+  const languageOptions: Array<[value: string, label: string]> = [
+    [AUTO_LANGUAGE, "Auto (match the message)"],
+    ...LANGUAGE_PRESETS.map((preset): [string, string] => [preset, preset]),
+    [OTHER_LANGUAGE, "Other…"],
+  ];
+  for (const [value, label] of languageOptions) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    els.language.append(option);
   }
 
   const saved = await loadSettings();
@@ -184,6 +286,8 @@ async function init(): Promise<void> {
     els.baseUrl.value = saved.baseUrl;
     els.apiKey.value = saved.apiKey;
     els.model.value = saved.model;
+    els.sendImages.checked = saved.sendImages;
+    applyLanguage(saved.language);
   }
   applyProvider(currentProvider, null);
   await refreshPermission();
@@ -194,12 +298,27 @@ async function init(): Promise<void> {
     currentProvider = next;
     void refreshPermission();
   });
+  els.language.addEventListener("change", () => {
+    const custom = els.language.value === OTHER_LANGUAGE;
+    els.languageOther.hidden = !custom;
+    // Revealing an empty box the user has to go and find is the same as not revealing it.
+    if (custom) els.languageOther.focus();
+  });
   els.baseUrl.addEventListener("change", () => void refreshPermission());
   els.form.addEventListener("submit", onSave);
   els.test.addEventListener("click", onTest);
 }
 
-init().catch((err: unknown) => {
-  log.error("options init failed", err);
-  setStatus(`Failed to load settings: ${err instanceof Error ? err.message : String(err)}`, "error");
-});
+const requestedGrant = new URLSearchParams(window.location.search).get("grant");
+if (requestedGrant === null) {
+  init().catch((err: unknown) => {
+    log.error("options init failed", err);
+    setStatus(`Failed to load settings: ${err instanceof Error ? err.message : String(err)}`, "error");
+  });
+} else {
+  // A popup opened to answer one question: showing the whole form here would invite the
+  // user to edit settings in a 460px window and lose the grant they came for.
+  els.settingsView.hidden = true;
+  els.grantView.hidden = false;
+  initGrant(requestedGrant);
+}

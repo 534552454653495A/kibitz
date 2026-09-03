@@ -4,7 +4,7 @@
  * A Record keyed by ProviderId rather than a switch so that adding a provider is one
  * import and one entry, and the compiler refuses a ProviderId without a constructor.
  */
-import type { ProviderId, Settings } from "../../shared/settings";
+import type { ProviderId, Settings } from "../../core/settings";
 import { createAnthropicProvider } from "./anthropic";
 import { createOpenAiCompatibleProvider } from "./openai-compatible";
 import type { LlmProvider } from "./types";

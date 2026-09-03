@@ -69,6 +69,27 @@ describe("serializeMessage", () => {
     const out = serializeMessage(message({ id: "1", isSystem: true, content: "joined" }));
     expect(out).toContain("[system notice]");
   });
+
+  // The model must not be handed a URL for a picture it can already see: told a link, it
+  // describes the link. Images the cap dropped keep their URL — that is all we can offer.
+  it("names an image that travels with the request and keeps the URL for one that does not", () => {
+    const out = serializeMessage(
+      message({
+        id: "3",
+        attachments: [
+          { id: "sent", kind: "image", name: "shot.png", url: "https://x/shot.png" },
+          { id: "dropped", kind: "image", name: "extra.png", url: "https://x/extra.png" },
+          { id: "doc", kind: "file", name: "notes.pdf", url: "https://x/notes.pdf" },
+        ],
+      }),
+      { attachedImageIds: new Set(["sent"]) },
+    );
+    expect(out.split("\n").slice(1)).toEqual([
+      "    [image attached to this request: shot.png]",
+      "    [attachment: image extra.png https://x/extra.png]",
+      "    [attachment: file notes.pdf https://x/notes.pdf]",
+    ]);
+  });
 });
 
 function thread(ids: string[], anchorId: string): UniversalThread {

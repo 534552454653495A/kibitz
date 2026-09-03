@@ -15,10 +15,13 @@
     "test": "vitest run",
     "probe": "tsx probe/run.ts",
     "probe:selftest": "tsx probe/run.ts --fixture probe/fixtures/discord-like.html",
+    "probe:selftest:desktop": "tsx probe/run.ts --fixture probe/fixtures/discord-like.html --shell desktop",
+    "desktop": "tsx desktop/cli.ts",
     "check": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
-    "preact": "^10.29.8"
+    "preact": "^10.29.8",
+    "puppeteer-core": "^25.9.0"
   },
   "devDependencies": {
     "@types/chrome": "^0.2.8",

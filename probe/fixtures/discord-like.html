@@ -32,6 +32,28 @@
       li[id^="chat-messages-"] { padding: 4px 16px 4px 72px; position: relative; }
       li[id^="chat-messages-"] h3 { margin: 0; font-size: 15px; color: #f2f3f5; }
       li[id^="chat-messages-"] time { color: #949ba4; font-size: 12px; margin-left: 8px; }
+      /*
+        Hover toolbar. Not decoration: it reproduces the properties measured on live Discord
+        (2026-09-02) — a ~257x34 box, `position: absolute`, `z-index: 1`, INSIDE the message
+        row (not portaled), anchored to its top-right, mounted only while the row is hovered.
+        A message whose text ends under it would put our trailing inline ✦ beneath it. The
+        `button-under-toolbar` check does not depend on such a message existing: it moves our
+        own host into this box, because text length is a font- and viewport-dependent way to
+        arrange a stacking test.
+      */
+      li[id^="chat-messages-"] .hover-actions {
+        display: none;
+        position: absolute;
+        top: -8px;
+        right: 16px;
+        width: 257px;
+        height: 34px;
+        z-index: 1;
+        background: #313338;
+        border: 1px solid #1e1f22;
+        border-radius: 8px;
+      }
+      li[id^="chat-messages-"]:hover .hover-actions { display: block; }
       #composer { height: 68px; padding: 0 16px; }
       #composer div { margin-top: 12px; background: #383a40; border-radius: 8px; padding: 11px 16px; color: #6d6f78; }
     </style>
@@ -124,6 +146,14 @@
             article.append(media);
           }
           li.append(article);
+          // Mounted for every row; CSS shows it only while the row is hovered, exactly like
+          // Discord's. Appended after the article — its position is absolute, so DOM order
+          // does not place it, but it must not sit in the text flow.
+          const actions = document.createElement("div");
+          actions.className = "hover-actions";
+          actions.setAttribute("role", "group");
+          actions.setAttribute("aria-label", "Message actions");
+          li.append(actions);
           li[FIBER_KEY] = { memoizedProps: { message, channel }, return: null, child: null, sibling: null };
           return li;
         }

@@ -41,17 +41,23 @@ Terminology used throughout:
 
 ```
 manifest.jsonc          Commented source of truth; build strips comments → dist/manifest.json
-scripts/build.ts        esbuild: 4 entry points → dist/ (content, discord-bridge, background, options)
+scripts/build.ts        esbuild: 5 entry points → dist/ (content, discord-bridge, background, options,
+                        desktop-renderer); fails if the desktop bundle references chrome.*
 src/core/               types.ts (UniversalMessage), adapter.ts (PlatformAdapter), validate.ts,
-                        messaging.ts (panel↔background protocol), prompt.ts, context.ts, prompts/*.md
+                        messaging.ts (shell protocol), settings.ts (LLM settings schema), prompt.ts,
+                        context.ts, prompts/*.md
 src/adapters/discord/   selectors.ts, bridge-protocol.ts, bridge.main.ts, normalize.ts, adapter.ts, scroller.ts
-src/content/            index.ts (entry), injector.ts (MutationObserver → buttons)
-src/ui/                 button/, panel/ (Preact in Shadow DOM), options/ (settings page)
-src/background/         index.ts (service worker), providers/ (openai-compatible, anthropic, sse)
-src/shared/             ext.ts, log.ts, page-rpc.ts, settings.ts, dom-markers.ts
-probe/                  run.ts, checks.ts, report.ts, outline.ts, page-helper.ts, discord-session.ts,
-                        fixtures/discord-like.html (contract-shaped page for `npm run probe:selftest`)
-tests/                  vitest; mirrors src/ layout
+src/shell/              types.ts (Shell), extension.ts (Port to the service worker),
+                        desktop.ts + desktop-protocol.ts (CDP binding), replies.ts (reply validation)
+src/content/            start.ts (boot shared by hosts), index.ts (extension entry), injector.ts
+src/desktop/            renderer.ts (bundle injected into Discord desktop)
+src/ui/                 shadow-host.ts (isolated hosts — 3.5), button/, options/ (extension page + grant),
+                        panel/ (frame, registry, views/chat, views/settings, state, layout, markdown)
+desktop/                kibitz-desktop companion (Node): cli.ts, companion.ts, inject.ts,
+                        request-handler.ts, discord-launch.ts, settings-store.ts, setup.ts, cdp.ts
+probe/                  run.ts (--fixture, --shell extension|desktop), checks.ts, report.ts, outline.ts,
+                        page-helper.ts, discord-session.ts, fixtures/discord-like.html
+tests/                  vitest; mirrors src/ layout (+ tests/scripts/*.test.sh run by ci.yml)
 .github/workflows/      ci.yml, canary-probe.yml, ai-fix.yml, ai-review.yml
 .github/ai/             prompts, output schemas and the path allowlist for the agents
 ```
@@ -104,16 +110,48 @@ service worker; content scripts and the bridge never see the key.
 **Because:** `storage.sync` uploads to the user's Google account; a BYO key is the user's
 money. A content script shares a tab with a site we do not control — the key must not be
 reachable from there. The service worker requests host permission for exactly the API
-origin the user configured (`optional_host_permissions` + `permissions.request`), so the
+origin the user configured (`optional_host_permissions` + a one-button grant window), so the
 extension has zero host access until a user grants one.
 
-### 3.5 All injected UI lives in Shadow DOM
+Amendment (2026-09-02, owner's request): settings are edited **inside the panel**, so the
+key crosses into the UI layer. What that costs depends on the host, and `Shell.capabilities`
+carries the answer: in the extension the panel runs in the isolated world, so the page
+cannot read the field or our variables, and the key still travels content script → port →
+service worker → `storage.local`, never into the page realm. On the desktop the renderer
+*is* Discord's realm, so a key typed there is readable by Discord's own scripts;
+`keyIsPageVisible` is true, the settings view says so, and `npm run desktop -- setup`
+remains the safer path. A stored key is never sent back to the UI — `SettingsDraft` carries
+`hasKey`, not the key.
 
-Buttons and the panel are mounted inside `attachShadow({ mode: "open" })` hosts with their
-own stylesheet.
-**Because:** Discord's global CSS would restyle our UI, and our CSS would leak into
-Discord's. `mode: "open"` (not `closed`) so the probe and tests can drive the UI through
-`host.shadowRoot`.
+### 3.5 All injected UI lives in an isolated Shadow DOM host
+
+Buttons and the panel are created **only** through `createShadowHost`
+(`src/ui/shadow-host.ts`), never with a bare `attachShadow`.
+**Because** two things must be isolated, and only one of them is CSS:
+
+- **Styles** — Discord's global CSS would restyle our UI, and ours would leak into Discord.
+- **Events** — Shadow DOM *retargets* events: a keydown in our `<textarea>` reaches
+  `document` with `target` = the host `<div>`. Discord's global key handling reads that as
+  "the user is typing outside an input", focuses its own message box and takes the
+  keystrokes. Measured on Discord Stable (2026-09-02): typing `abc` into our composer left
+  it empty and put `abc` in Discord's message box — the chat was unusable from day one.
+  `createShadowHost` therefore stops keyboard, clipboard and pointer events at the
+  host in the **bubble** phase: our own handlers live inside the shadow tree and have
+  already run, while `document` never sees the event. A capture-phase guard on `window`
+  also blocks Discord but swallows our handlers too (measured: Enter inserted a newline
+  instead of sending), which is why the guard is on the host and not on window.
+  `wheel` is deliberately **not** in that list: scroll chaining is not propagation, so a
+  wheel guard would not stop Discord's list from scrolling under a pane that hit its end —
+  `overscroll-behavior: contain` in `panel.css` does that.
+
+`mode: "open"` (not `closed`) so tests and the probe can drive the UI through
+`host.shadowRoot`. The probe's `panel-input` check types into a panel field on live Discord
+and fails if the text lands anywhere else — that is the regression guard.
+
+Never serialise settings by hand. `redactSettings` (`src/core/settings.ts`) is the only
+sanctioned way to put a configuration into a log, an error, a report or a diagnostic
+script: it rebuilds the object instead of pattern-matching text, so no formatting can carry
+the key through (see §12, 2026-09-02).
 
 ### 3.6 One file owns the Discord contract
 
@@ -129,6 +167,30 @@ hidden in `injector.ts` is a selector nobody will find at 3 a.m.
 requires editing `src/core/`, the abstraction leaked; fix the abstraction, do not special-case.
 Lint by grep: `src/core/` must contain no `discord`, no `chrome.`, no `document.` outside
 `page-rpc`-style generic DOM plumbing that lives in `src/shared/`.
+
+### 3.8 The UI talks to its host through one seam
+
+Everything the in-page UI needs from its runtime — streaming an answer, asking whether a
+key is configured, opening settings — goes through `Shell` (`src/shell/types.ts`). Two hosts
+implement it: the Chrome extension (`shell/extension.ts`: a Port to the service worker,
+`chrome.storage`) and the Discord desktop companion (`shell/desktop.ts`: a CDP binding to a
+Node process that holds the settings file and makes the HTTP calls).
+**Because:** the same panel, injector and adapter must run inside Discord's Electron
+window, where there is no extension API at all. Desktop support was added without
+touching `src/core/`, `src/adapters/` or `src/ui/panel/state.ts` — that is the test of the
+seam, and the build enforces it: `dist/desktop-renderer.js` must not reference `chrome.*`.
+
+Consequences: `src/ui/` and `src/content/` never import `shared/ext.ts`; provider code and
+error classification (`src/background/providers/`) are Node-safe because the companion
+reuses them; the LLM settings schema lives in `src/core/settings.ts` so "configured" means
+the same thing in `chrome.storage.local` and in `settings.json`.
+
+Why CDP and not a Vencord-style patcher: a patcher rewrites files inside Discord's install
+and dies on every Discord update; the companion changes nothing on disk and survives
+updates, at the price of starting Discord with `--remote-debugging-port` and keeping a
+process running. The cost that must stay documented: while Discord listens on that port,
+any local process can drive it (including reading the session token). The port is bound to
+127.0.0.1 and chosen from 9300–9399; there is no authentication in CDP.
 
 ---
 
@@ -166,11 +228,22 @@ Known canonical homes:
 | Object type guard | `isRecord` from `src/core/validate.ts` |
 | Validate a message at a boundary | `assertUniversalMessage` (`src/core/validate.ts`) |
 | Cross-world RPC | `createRpcServer` / `createRpcClient` (`src/shared/page-rpc.ts`) |
-| Extension API | `ext` from `src/shared/ext.ts` (never bare `chrome.` outside `src/shared/`, `src/background/`, `src/ui/options/`) |
+| Extension API | `ext` from `src/shared/ext.ts` (only inside `src/shell/extension.ts`, `src/shared/`, `src/background/`, `src/ui/options/`; never in `src/ui/panel`, `src/content`, `src/core`, `desktop/`) |
+| Host runtime from the UI | `Shell` (`src/shell/types.ts`): `createExtensionShell()` / `createDesktopShell()` |
 | Logging | `log` from `src/shared/log.ts` (prefix is what the probe filters on) |
-| Settings | `loadSettings` / `saveSettings` / `originPattern` (`src/shared/settings.ts`) |
+| Settings schema / validation | `parseSettings`, `PROVIDER_PRESETS`, `originPattern` (`src/core/settings.ts`) |
+| Panel draft + stored key → settings | `mergeSettingsInput` (`src/core/settings.ts`) — pure, Node-safe; used by `src/background/settings-service.ts` and `desktop/request-handler.ts` |
+| Settings → outgoing messages | `applyImagePolicy`, `applyLanguagePolicy` (`src/core/settings.ts`) — both called side by side in `src/background/chat-session.ts` and `desktop/request-handler.ts`, the last point before the request leaves |
+| Answer-language values | `AUTO_LANGUAGE`, `LANGUAGE_PRESETS`, `normalizeLanguage` (`src/core/settings.ts`) — the panel, the options page and `desktop -- setup` all read this one list |
+| Settings persistence | extension: `src/shared/settings.ts` (chrome.storage); desktop: `desktop/settings-store.ts` (settings.json) |
+| LLM providers + error → ChatErrorCode | `createProvider` (`src/background/providers/index.ts`), `classifyError` (`providers/errors.ts`) — Node-safe, shared with the companion |
 | Prompt text | `.md` files in `src/core/prompts/`, rendered by `src/core/prompt.ts` |
 | SSE parsing | `src/background/providers/sse.ts` |
+| Inject into a Discord window over CDP | `attachKibitz` / `deliver` (`desktop/inject.ts`) — the probe's desktop mode uses the same functions |
+| Any injected UI element | `createShadowHost` (`src/ui/shadow-host.ts`) — never a bare `attachShadow`; it carries the event isolation (3.5) |
+| A new panel feature | a `PanelView` (`src/ui/panel/views.ts`) registered in `src/ui/panel/registry.ts`; its buttons get an `ActionName` in `src/shared/dom-markers.ts` and a method on `PanelActions` (`src/ui/panel/actions.ts`) |
+| Panel geometry | `src/ui/panel/layout.ts` (`clampLayout`, `layoutStyle`, `installLayoutController`) over `layout-model.ts` values; persisted through `Shell.loadUiState/saveUiState` |
+| Rendering model output | `renderMarkdown` (`src/ui/panel/markdown.ts`) — builds Preact nodes; `innerHTML` is never used on model or message text |
 
 Missing capability? Extend the canonical helper; do not fork it locally.
 
@@ -220,7 +293,9 @@ Each `it(...)` title should read as the failure mode: `it("keeps // inside URL s
   `// @vitest-environment jsdom` at the top of the file.
 - No test may import from `dist/`.
 - The probe is not a unit test and is not run by `npm test`. It is the integration signal.
-  `npm run probe:selftest` (ci.yml) is the account-free half of it and is a **wiring**
+  `npm run probe:selftest` (ci.yml) and `npm run probe:selftest:desktop` (same checks, same
+  fixture, but plain Chrome + the companion's `attachKibitz` instead of the extension) are
+  the account-free half of it and a **wiring**
   regression signal only: the fixture is written by us to satisfy `selectors.ts`, so every
   check passes by construction. A green self-test proves injector → RPC → bridge → adapter
   → panel → scroll-back agree with each other. It proves nothing about Discord: the two DOM
@@ -296,7 +371,7 @@ of re-learning it.
 | Secret | Used by | Notes |
 | --- | --- | --- |
 | `DISCORD_PROBE_TOKEN` | canary-probe | Token of a **throwaway** account. Automation violates Discord ToS; the account may be terminated. Never a personal account. If Discord challenges logins from GitHub's datacenter IPs, the probe reports `failureKind: session` and files `auto:probe-session` (no agent); the remedy is a self-hosted runner on a residential IP or a fresh account, not a code change. |
-| `DISCORD_PROBE_CHANNEL` | canary-probe | `<guildId>/<channelId>` of a channel the throwaway account can read, with ≥60 messages including a reply and an attachment. |
+| `DISCORD_PROBE_CHANNEL` | canary-probe | `<guildId>/<channelId>` of a **text** channel the throwaway account can read, with ≥60 messages including a reply and an attachment. Forum, voice-only and unreadable channels render no message scroller at all, which `list-root` cannot distinguish from a dead selector — its error names both readings. |
 | `ANTHROPIC_API_KEY` | ai-fix, ai-review | Claude Code headless. Budget-capped per run via `--max-budget-usd`. |
 | `AI_FIX_TOKEN` | canary-probe (issue), ai-fix (push/PR) | Fine-grained PAT or GitHub App token with Contents RW + Issues RW + Pull requests RW on this repo only. |
 
@@ -432,3 +507,258 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   `pipefail` turned into a red report job → the script now handles the missing directory.
   Verification that counts for workflow changes: `gh workflow run … --ref <branch>` and
   read the job conclusions, not a local YAML parse.
+- **2026-09-02 — Discord desktop support (owner's request).** Options weighed: a
+  Vencord-style patcher (rewrites `resources/app` inside Discord's install, breaks on every
+  Discord update, GPL pattern — code off-limits), a BetterDiscord plugin (depends on a
+  third-party mod), or a CDP companion. Chosen: the companion — no files touched, survives
+  updates, reuses the probe's Puppeteer path — accepting that Discord must be launched with
+  `--remote-debugging-port` and that the port is unauthenticated on localhost.
+  → Section 3.8; the `Shell` seam; `dist/desktop-renderer.js` must be chrome-free (build
+  check); Windows is the only exercised platform, macOS/Linux launch paths are marked
+  untested in `desktop/discord-launch.ts`.
+- **2026-09-02 — The chat composer never worked, and nothing caught it.** The owner
+  reported "I cannot send messages" in the extension and dead buttons on the desktop. Cause:
+  Shadow DOM retargets events, so every keystroke in our textarea reached Discord's
+  document-level key handling, which focused Discord's own message box and typed there —
+  measured: `abc` into our composer left it empty and appeared in Discord's box. The unit
+  tests dispatched events at our elements directly (no Discord listeners), and the fixture
+  self-test has no Discord key handling, so both stayed green. Second finding: on the
+  desktop the only affordance without a key was a button that printed to a terminal the
+  user was not watching.
+  → `createShadowHost` with bubble-phase isolation (3.5); the probe's `panel-input` check
+  types into the panel on live Discord; settings moved into the panel (3.4 amendment).
+  Rule that generalises: **a UI regression that only appears inside the host page must be
+  caught by a live check, not by a jsdom test** — jsdom has no Discord.
+
+- **2026-09-02 — A diagnostic printed the owner's live API key into a session transcript.**
+  A throwaway script `cat`ed `settings.json` through a hand-written redaction regex
+  (`"apiKey":"[^"]*"`) that did not match the file's pretty-printed `"apiKey": "…"` spacing,
+  so the real OpenAI key was echoed in full — twice — and had to be revoked. The same script
+  was about to write a dummy key over that file; it only stopped because an unrelated
+  assertion failed first.
+  → `redactSettings` (`src/core/settings.ts`) is the only sanctioned formatter for a
+  configuration, and it rebuilds the object rather than matching text (§3.4).
+  Two rules that generalise: **never point a diagnostic at the user's real config file** —
+  copy it aside or run the companion with `--settings <temp>`; and **never assert on a
+  secret's value** — `hasKey`/`apiKeyLength` is all a check ever needs.
+- **2026-09-02 — Clicking in a virtualised list is a race, and losing it looks like a broken
+  button.** On live Discord `scrollIntoView` + `ElementHandle.click()` put the pointer where
+  the host *had* been; the list had re-rendered, the click landed on `<html>`, the panel
+  never opened, and the run read as a contract failure — a scheduled probe would have filed
+  `auto:broken-selector` and set the fix agent on a phantom. Diagnosis cost an hour because
+  a synthetic `button.click()` worked while a real click did not.
+  → `button-clickable` now samples the click point twice, requires it to hold still and to
+  hit-test to our host, and clicks coordinates rather than a stale handle. When a check
+  cannot find what an earlier check saw, `assertStillOnChannel` decides whether the view
+  simply left the channel (`ProbeSessionError` → `failureKind: session`, no agent) — proven
+  live when the owner navigated Discord mid-run.
+- **2026-09-02 — `ReferenceError: __name is not defined` inside a probe check.** A named
+  inner arrow in a `page.evaluate` callback is compiled by tsx with esbuild's `__name`
+  helper, which does not exist in the page; the check failed in a way that read like broken
+  UI. → No named inner functions in page callbacks — inline the expression. The same trap
+  applies to `\s` inside an evaluate template literal: it resolves to `s`, so
+  `.replace(/\s+/g, " ")` silently deletes every "s" from the result.
+- **2026-09-02 — The ✦ was unclickable under Discord's hover toolbar, and proving it took
+  three wrong measurements.** The toolbar appears exactly when the pointer is over the row,
+  i.e. when someone is about to click, so a message whose text reaches the right of the
+  column hid the button behind it. Measured on live Discord: the toolbar is `position:
+  absolute; z-index: 1`, ~257×34, anchored top-right **inside** the row (not portaled), so
+  a static host loses the hit test. Fix: `position: relative; z-index: 2` on the button host
+  (same stacking context, so out-stacking is enough), pinned by the `button-under-toolbar`
+  probe check, which fails without those two declarations.
+  The wrong measurements are the lesson: (1) an element rect is widened by image/embed
+  children, so "the text reaches x=1554" was false — measure the end of text with a `Range`
+  over its text nodes; (2) `offsetWidth` of a `display:none` toolbar is 0, which placed the
+  test button on the toolbar's edge instead of inside it — hover first, then measure;
+  (3) box intersection is not coverage, because the hit test happens at one point: the first
+  version of the check overlapped by a single pixel, the centre fell below the toolbar, and
+  it passed while testing nothing. A check that cannot fail is worse than no check.
+- **2026-09-02 — A channel with no message list is usually a voice channel.** A channel the
+  probe (and the injector) found empty of `[data-list-id="chat-messages"]` turned out from
+  its sidebar entry to be the voice channel the developer was connected to — not a text
+  channel with a different list id, so the selector contract has no hole there. The only
+  `data-list-id` values in a normal view are `guildsnav`, `private-channels-*` and
+  `chat-messages`. → `list-root`'s error names this reading; §7.2 requires a text channel.
+- **2026-09-02 — Live verification competes with the developer using Discord.** Five live
+  runs were defeated by channel switches, a channel with no chat scroller, and an open
+  context menu whose transparent full-viewport backdrop covered every target. Electron
+  refuses `Target.createTarget`, so a probe cannot open its own page. → Live checks against
+  a shared window prove only what they observe; the scheduled probe (dedicated throwaway
+  account, nobody driving) is the authority, and `failureKind` exists so a disturbed run
+  never wakes the fix agent.
+- **2026-09-02 — Images are sent as URLs, not bytes (owner's request).** The model answered
+  "I cannot read the image" because an attachment reached it only as the text line
+  `[attachment: image shot.png <url>]`. Verified formats before writing anything: OpenAI
+  **Chat Completions** takes `{type:"image_url",image_url:{url}}` where the url may be
+  http(s) or a `data:` URL; Anthropic Messages takes `{type:"image",source:{type:"url",url}}`
+  and its docs prefer images **before** the text block. Both now receive the picture, images
+  first, and only on `user` turns.
+  Decisions: pass the CDN URL through rather than downloading bytes — the provider fetches
+  it, which keeps the extension free of a `cdn.discordapp.com` host permission, and the
+  request goes out while Discord's signed link is still fresh. The cost is that the provider
+  sees a Discord link, which the README states plainly. Discord's `media.discordapp.net`
+  mirror is used with `format=webp&width=1024&height=1024` (what Discord's own client asks
+  for) because a smaller image is fewer tokens of the user's money; the `ex`/`is`/`hm`
+  signature parameters must survive that rewrite or the link 404s. Cap: four images per
+  request, the anchored message's first.
+  The `sendImages` setting is enforced **provider-side** (`applyImagePolicy`, called by the
+  service worker and the companion) rather than in the panel: the panel never sees
+  `Settings`, and honouring it there would have meant a new `Shell` method for one boolean.
+  A stored configuration without the field reads as **on**, or the feature would look like
+  it never shipped.
+- **2026-09-02 — The URL-passing assumption was measured, and its gap named.** URL-passing
+  rests on "a provider's server can GET a signed Discord attachment link", which nothing had
+  tested. Measured with an anonymous Node fetch — no cookies, no session, exactly what a
+  provider has: `cdn.discordapp.com/…?ex&is&hm` → 200 `image/png` 290 KiB, `proxy_url` → 200
+  `image/webp` 115 KiB, and our `previewUrlFor` rewrite → 200 `image/webp` **40 KiB**. So the
+  links are public and the rewrite is 7× cheaper while keeping the signature valid; that also
+  validated `previewUrlFor` against the real CDN, which its string-level unit tests cannot.
+  A **hosted** provider's fetcher is now proven too, end to end on live Discord with the
+  owner's own OpenAI-compatible endpoint: the request carried
+  `images[media.discordapp.net … 1024×1024 signed]` and the answer described what was in the
+  picture ("an anime-style, animal-eared character sitting on the floor … used as a reaction
+  image"), which is only possible if the provider retrieved the signed link. Still unproven,
+  and deliberately not claimed: **self-hosted** servers. One may have no route to the
+  internet, and some (LM Studio) never fetch URLs at all — they want inline bytes. That
+  failure has its own sentence in `providers/errors.ts`, separate from "your model has no
+  vision", because the remedies differ. If it turns out to matter, the fix is to inline bytes
+  as a `data:` URL (OpenAI) / `source:{type:"base64"}` (Anthropic); the companion can fetch
+  them freely, while the extension would need a host permission for `media.discordapp.net` or
+  a fetch performed in the page — which is why it was not built on speculation.
+- **2026-09-02 — Image support looked broken for hours because the injected renderer was
+  four hours old.** The companion reads `dist/desktop-renderer.js` **once**, at start, and
+  `evaluateOnNewDocument` captures that text — so after `npm run build` the running Discord
+  keeps executing the previous renderer, and Ctrl+R does not help because the reload re-runs
+  the same captured copy. The owner reported "it still cannot see images"; the bundle on disk
+  had vision code and was four minutes old, while the companion had been up 4h34m. Restarting
+  it fixed it instantly, and the model then described the picture.
+  → `readBundle` logs the bundle's size and build time at startup, `replaceBundle`
+  (`desktop/inject.ts`) swaps the init script, and `runCompanion` watches for rebuilds and
+  prints "renderer bundle rebuilt — press Ctrl+R in Discord to load it".
+  **The first version of that fix was a lie, and measuring it is what caught it.** "Watching
+  the line appear" was mistaken for the fix working; patching `dist/` and reloading showed the
+  page still running the old bundle. **Three** causes, found one at a time, each by measuring
+  the thing actually claimed:
+  1. `fs.watch(file)` on Windows caught the first `npm run build` and then went permanently
+     deaf — esbuild replaces the file, so the handle watches an inode that no longer exists.
+  2. Watching the **directory** instead died too, for the same reason one level up:
+     `scripts/build.ts` starts with `fs.rm(dist, { recursive: true })`, so `dist/` is itself a
+     new inode after every build. The probe that "proved" the directory watch rewrote the file
+     *inside* `dist` — a write the real build never performs — so it proved nothing.
+     Now `watchFile` polls the **path**: no inode identity to lose, at the cost of one `stat`
+     per second. Proven against a real `npm run build`, the one that deletes the directory.
+  3. A read can land mid-write and `readFile` **succeeds** on a truncated file, which would
+     inject a broken renderer. The text must now come back non-empty and the same size twice,
+     and a file that is missing (the `rm` window) is retried rather than treated as a failure.
+  A fourth, found later by review: `attach` closed over the bundle this process **started**
+  with, so a popout or a re-created window got the stale renderer even while the watcher was
+  working. The armed bundle is now one mutable holder that both the watcher and `attach` read.
+  Rule that generalises: **a fix whose evidence is a log line is not evidence.** The claim was
+  "Ctrl+R loads the new build", so the check has to be Ctrl+R, then read what is live.
+  The same trap exists for the extension with a different remedy: `chrome://extensions` → ↻
+  and reload the Discord tab. Any report of the shape "my change is not there" starts by
+  checking which build is actually running.
+- **2026-09-03 — One conversation per author, not per message (owner's request).** Clicking ✦
+  on a second message re-mounted the panel: the previous cards, answers and the history the
+  model had already been given were thrown away, so asking about three messages from one
+  person cost three cold starts and the model could never connect them.
+  → `open()` (`src/ui/panel/mount.ts`) reads the message **first**, because the author is the
+  deciding fact and only the read knows it, then either `continue` (same author, same channel)
+  or restarts. `Turn` is a union and a message card is a turn, so cards sit inside the
+  transcript in click order — a fixed card above the conversation could only ever show one.
+  The channel is part of the test deliberately: the same person's messages in another server
+  are another subject, and folding them into one prompt would ship one server's content as
+  context for a question about another. Clicking the ✦ of the message already answered does
+  nothing at all — re-asking would bill the user twice for an answer already on screen.
+  Mutation-checked: forcing the restart path fails 2 tests, ignoring the author check fails 1.
+- **2026-09-03 — Live UI verification on a hidden window, and what it cost to learn.** Driving
+  the owner's Discord with CDP mouse clicks silently stopped working: a real click produced
+  **no DOM events at all** — not even a capture-phase `pointerdown` — while a synthetic
+  `.click()` ran the full path including our handler's `preventDefault`. Cause: the window
+  reports `document.visibilityState === "hidden"` (it sits behind other windows), and Chromium
+  drops synthesized mouse input for a hidden page because the hit test happens in a compositor
+  that is not running. The same state is why `requestAnimationFrame` never fired (the injector
+  bug above). Consequences for anyone verifying live:
+  1. Hit-testing claims (is the button reachable, is something covering it) need a **visible**
+     window — that is the probe's `button-clickable` job, and its live run needs the window up.
+  2. Behaviour claims (does the setting apply, does the conversation continue) may be driven by
+     activating our own elements directly, and the report must say so.
+  3. A blind `waitFor(state === "ready")` hides all of this. Wait for "ready **or** error" and
+     print the panel's own `data-kibitz-error`; a timeout is not a diagnosis.
+  Proven this way, on live Discord with the owner's own provider: `language: "English"` stored
+  (read back through `redactSettings`), a Turkish message, and an English answer — `auto` would
+  have answered Turkish, so the setting is the only explanation. Two earlier attempts at this
+  test were vacuous (a letter-only Turkish detector called "japon pornosu gibi amk" not
+  Turkish, and a pair picked from a different author). The rule that generalises: **a test
+  whose two sides can both be produced by the old behaviour** is not a test.
+- **2026-09-03 — A late `load-settings` reply overwrote what the user had just changed.** The
+  settings view seeds from the draft and re-seeds when one ARRIVES, which is a round trip after
+  the view opens. Pick a language in that window and the reply put the stored one back, then
+  Save wrote the value the user did not choose. Found by automation hitting it in under a
+  second while proving the language setting; a human who opens Settings and immediately edits
+  hits it too.
+  → The view tracks which fields were edited and the arriving draft skips those, and the set is
+  cleared on save (after a save the stored value IS the user's choice, which is what still
+  clears the key field). Mutation-checked in both directions. The tests wait for an observable
+  consequence of the adopt before asserting: the first version asserted immediately, which
+  passed whether the effect ran or not.
+- **2026-09-03 — A reply belongs to the conversation it answers (owner's request).** The
+  same-author rule shipped that morning restarted the panel when the clicked message came from
+  someone else — including the commonest case in a real channel: Yunus writes, Adem **replies**
+  to him, and the answer to Adem's reply opened a cold panel that had never seen Yunus's
+  message. The owner's words: "o da aynı konu üzerine olduğu için aynı sohbete katılmalı …
+  eğer yunusun mesajını yanıtlamayıp yazsaydı onun için ayrı sohbet açılırdı."
+  → `admitsMessage` (`src/ui/panel/state.ts`) decides membership from what is on screen: the
+  author already speaks here, or the message replies **into** the conversation, or the
+  conversation already replies **to** it (the mirror case — read an answer about a reply, then
+  click the message it answered). `UniversalReply.messageId` makes all three exact id
+  comparisons, never a text or author-name guess.
+  Deliberately excluded: a participant's reply to some *other* message. It is a different
+  exchange by a familiar face, and closing the panel is the way to start over.
+  Mutation-checked: dropping reply-into fails 1 test, dropping the mirror fails 1, admitting
+  everything fails 2.
+- **2026-09-03 — Conversation history (owner's request), and the decisions inside it.** Saved
+  conversations, a list in the panel, and search "not necessarily word-based — I want to ask
+  the AI: Yunus had this thing about AI, can you find it in our past conversations?"
+  Decisions the owner made, with what each one costs:
+  1. **Unlimited retention.** Nothing is pruned; only their delete removes anything. That is
+     why `unlimitedStorage` is in the manifest — it lifts Chrome's 10 MB quota and grants no
+     new access. A full or unwritable store therefore has to be *said*: `saveConversation`
+     returns `{ok:false,error}` and the panel shows it as a turn, because the alternative is an
+     answer that silently was not kept.
+  2. **One request for the AI search**, over a one-line-per-conversation catalogue, not a
+     two-pass read of the top hits. A question asked casually must not cost twice.
+  3. **Model-written titles**, 3-5 words, one small request after the first answer only, with
+     `fallbackTitle` (author + their words) until then and forever if it fails. A title is not
+     worth an error the user has to read.
+  `Turn` moved to `src/core/history.ts`: a saved conversation has to be re-openable, so the
+  transcript is part of the record, and a record is something both hosts read — the panel's
+  state machine imports the core's shape rather than declaring a second one.
+  Both `turns` and `history` are stored because neither derives from the other: a synthesis
+  after "Scan related messages" replaces the model history with a thread prompt the display
+  never had, and the display carries notes and errors the model never saw.
+  The local filter narrows the catalogue **only when it matched something** — a prose question
+  matches no line literally, and an empty catalogue would make the request pointless. That one
+  line is what makes the owner's own example work.
+  Verified live on their Discord with their own provider: the record on disk carried the
+  Turkish title the model wrote, the transcript round-tripped (`[system, user, assistant]`),
+  the filter narrowed 1 → 0 rows on a nonsense word, and the prose question "hangi sohbette
+  videodan bahsetmiştik, bulabilir misin?" — which filters everything out — came back naming
+  the conversation, the person and the date, with a button that reopened it.
+- **2026-09-03 — "malformed request" meant "restart the companion".** Every history request
+  came back `{ok:false,error:"malformed request"}` against a companion whose own code predated
+  the feature. The bundle watcher re-arms the **renderer**; nothing re-arms the Node process,
+  which loads its code once at start. The reply now names the type and says what to do
+  ("this companion does not understand "save-conversation" — restart it (npm run desktop)"),
+  because the previous wording pointed the search at the panel, which was innocent.
+  Rule: a protocol error must say which side is behind, or it sends the reader to the wrong
+  half of the system. Two more turns went into getting that message right, both worth keeping:
+  it first said "restart" for a **known** type whose payload was refused (a malformed
+  `save-conversation` record parses to null exactly like an unknown type), and the fix for that
+  was a hand-kept set of known types beside the switch — a second home for one fact, which rots
+  the moment someone adds a case and forgets the set, printing "restart" for a type the build
+  handles perfectly. `parseRequest` now returns the reason itself
+  (`not-a-request` / `unknown-type` / `bad-payload`), decided by the same switch that accepts
+  requests, so there is nothing to keep in sync. Rule: **when a message depends on a
+  classification, the classifier must be the code that already knows** — a parallel list is a
+  bug with a delay on it.

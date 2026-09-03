@@ -27,7 +27,29 @@ const ENTRIES: Record<string, string> = {
   background: "src/background/index.ts",
   // options page: API key / provider / model
   options: "src/ui/options/options.ts",
+  // desktop: bridge + content + desktop shell in ONE bundle, injected into Discord's
+  // window over CDP by desktop/companion.ts (no extension runtime exists there)
+  "desktop-renderer": "src/desktop/renderer.ts",
 };
+
+/**
+ * The desktop bundle runs where `chrome` is undefined; one stray import of shared/ext.ts
+ * would throw at load and take the whole injection down silently. Fail the build instead.
+ *
+ * The check is for the BARE identifier: `export const ext = chrome` bundles as
+ * `var ext = chrome;` and every call site then reads `ext.runtime…`, so a pattern that
+ * expects `chrome.<member>` would miss the exact failure it exists for. The lookbehind
+ * excludes `.chrome` (a property) and identifier tails like `isChrome`.
+ */
+const BARE_CHROME = /(?<![.\w$])chrome\b/;
+async function assertDesktopBundleIsChromeFree(): Promise<void> {
+  const text = await fs.readFile(path.join(outDir, "desktop-renderer.js"), "utf8");
+  const hit = BARE_CHROME.exec(text);
+  if (hit) {
+    const line = text.slice(0, hit.index).split("\n").length;
+    throw new Error(`dist/desktop-renderer.js:${line} references the \`chrome\` global: the desktop bundle must not touch the extension API`);
+  }
+}
 
 const STATIC_FILES: Record<string, string> = {
   "options.html": "src/ui/options/options.html",
@@ -83,6 +105,7 @@ async function main(): Promise<void> {
 
   await ctx.rebuild();
   await ctx.dispose();
+  await assertDesktopBundleIsChromeFree();
   await copyStatic();
   console.log(`built kibitz ${manifest.version} → ${path.relative(root, outDir)}/`);
 }
