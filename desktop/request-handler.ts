@@ -65,6 +65,31 @@ function parseInput(value: unknown): SettingsInputMessage | null {
   return typeof language === "string" ? { ...withImages, language } : withImages;
 }
 
+/**
+ * Every request type this build answers. Its only job is to tell two failures apart, because
+ * they send the reader to opposite halves of the system: a type that is missing here means the
+ * companion is older than the bundle in Discord (restart it), and a type that IS here but
+ * whose payload was refused means the payload is wrong (a bug, or an older renderer sending a
+ * shape this build no longer accepts). Saying "restart" for the second one is how an hour went
+ * into the wrong half already (AGENTS.md 12, 2026-09-03).
+ */
+const KNOWN_TYPES: ReadonlySet<string> = new Set([
+  "settings-status",
+  "open-options",
+  "load-settings",
+  "load-ui-state",
+  "list-conversations",
+  "clear-conversations",
+  "save-settings",
+  "request-access",
+  "save-ui-state",
+  "cancel",
+  "load-conversation",
+  "delete-conversation",
+  "save-conversation",
+  "chat",
+]);
+
 function parseRequest(raw: unknown): DesktopRequest | null {
   if (!isRecord(raw)) return null;
   switch (raw.type) {
@@ -218,16 +243,21 @@ export function createDesktopRequestHandler(deps: RequestHandlerDeps): DesktopRe
       }
       const request = parseRequest(raw);
       if (request === null) {
-        // A request the renderer sends and this process has never heard of means one thing in
-        // practice: the companion is running code older than the bundle in Discord. Only a
-        // restart fixes that — the watcher re-arms the *renderer*, never this Node process —
-        // and "malformed request" sent an hour of debugging in the wrong direction
-        // (AGENTS.md 12, 2026-09-03). Say which type and what to do.
+        // Three different failures, three different readers to send somewhere useful:
+        //   no type at all      → the message is not one of ours;
+        //   an unknown type     → this process is older than the bundle in Discord, and only a
+        //                         restart fixes it (the watcher re-arms the renderer, never
+        //                         this Node process);
+        //   a known type refused → the payload is wrong, and blaming the companion's age would
+        //                         point at the wrong half — which is exactly what happened
+        //                         once already (AGENTS.md 12, 2026-09-03).
         const type = isRecord(raw) && typeof raw.type === "string" ? raw.type : null;
         const error =
           type === null
             ? "malformed request"
-            : `this companion does not understand "${type}" — it is running older code than the Kibitz bundle in Discord. Restart it (npm run desktop).`;
+            : KNOWN_TYPES.has(type)
+              ? `"${type}" was refused: its payload is not the shape this build accepts.`
+              : `this companion does not understand "${type}" — it is running older code than the Kibitz bundle in Discord. Restart it (npm run desktop).`;
         log.warn(`ignoring desktop request: ${error}`);
         return JSON.stringify({ ok: false, error } satisfies DesktopReply);
       }

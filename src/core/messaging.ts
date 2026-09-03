@@ -107,6 +107,7 @@ export interface SettingsStatus {
   model?: string;
 }
 
+/** Settings as the UI may see them: no key, only whether one is stored. */
 export interface SettingsDraftMessage {
   provider: string;
   baseUrl: string;

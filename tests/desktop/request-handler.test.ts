@@ -494,6 +494,16 @@ describe("version skew", () => {
     expect(reply).toMatchObject({ error: expect.stringContaining("npm run desktop") });
   });
 
+  it("blames the payload, not the companion's age, for a type this build DOES handle", async () => {
+    // The trap: `parseRequest` returns null for both failures. Telling the user to restart
+    // when the type is known would point them at the wrong half of the system - the mistake
+    // that cost an hour when a stale companion refused every history request.
+    const h = harness(SETTINGS);
+    const reply: unknown = JSON.parse(await h.handler.handle(JSON.stringify({ type: "save-conversation", record: { id: "" } })));
+    expect(reply).toMatchObject({ ok: false, error: expect.stringContaining('"save-conversation" was refused') });
+    expect(JSON.stringify(reply)).not.toContain("npm run desktop");
+  });
+
   it("still says 'malformed request' for something with no type at all", async () => {
     const h = harness(SETTINGS);
     expect(JSON.parse(await h.handler.handle(JSON.stringify({ nope: 1 })))).toEqual({ ok: false, error: "malformed request" });

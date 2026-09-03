@@ -752,4 +752,8 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   ("this companion does not understand "save-conversation" — restart it (npm run desktop)"),
   because the previous wording pointed the search at the panel, which was innocent.
   Rule: a protocol error must say which side is behind, or it sends the reader to the wrong
-  half of the system.
+  half of the system. And the first version of that message got it wrong in the other
+  direction — `parseRequest` returns null both for a type this build never heard of and for a
+  known type whose payload was refused, so "restart the companion" was about to be printed for
+  a malformed `save-conversation` record. `KNOWN_TYPES` now separates them: an unknown type
+  says restart, a known one says its payload is not the shape this build accepts.
