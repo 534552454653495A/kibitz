@@ -71,6 +71,24 @@ function SettingsView({ ctx }: { ctx: PanelContext }) {
   const [language, setLanguage] = useState<LanguageChoice>(() => seedLanguage(draft?.language ?? AUTO_LANGUAGE));
   const [revealed, setRevealed] = useState(false);
 
+  /**
+   * Which fields the user has changed since the last save. The arriving draft may not
+   * overwrite those.
+   *
+   * Measured on live Discord (2026-09-03): the settings view asks the host for the draft when
+   * it opens, so the reply lands a round trip later — pick a language in that window and the
+   * reply puts the stored one back, then Save writes the value the user did not choose. An
+   * automated run hit it in under a second; a human who opens Settings and immediately
+   * changes a field hits it too.
+   *
+   * Cleared on save, because after a save the stored value IS what the user chose: the fresh
+   * draft is then safe to adopt wholesale, which is what still clears the key field.
+   */
+  const edited = useRef(new Set<string>());
+  const touch = (field: string): void => {
+    edited.current.add(field);
+  };
+
   // The initial state above already carries whatever draft existed at mount, so the effect
   // must only react to a draft that ARRIVES later (the host answers `load-settings` a round
   // trip after the view opens, and `save-settings` produces a fresh one). Re-seeding on
@@ -81,13 +99,14 @@ function SettingsView({ ctx }: { ctx: PanelContext }) {
   useEffect(() => {
     if (draft === null || draft === adopted.current) return;
     adopted.current = draft;
-    setProvider(draft.provider);
-    setBaseUrl(draft.baseUrl);
-    setModel(draft.model);
-    setSendImages(draft.sendImages);
-    setLanguage(seedLanguage(draft.language));
+    const keep = edited.current;
+    if (!keep.has("provider")) setProvider(draft.provider);
+    if (!keep.has("baseUrl")) setBaseUrl(draft.baseUrl);
+    if (!keep.has("model")) setModel(draft.model);
+    if (!keep.has("sendImages")) setSendImages(draft.sendImages);
+    if (!keep.has("language")) setLanguage(seedLanguage(draft.language));
     // A key that was just saved must not linger in the DOM; the placeholder takes over.
-    if (draft.hasKey) setApiKey("");
+    if (draft.hasKey && !keep.has("apiKey")) setApiKey("");
   }, [draft]);
 
   const preset = PROVIDER_PRESETS[provider];
@@ -101,6 +120,9 @@ function SettingsView({ ctx }: { ctx: PanelContext }) {
     const to = PROVIDER_PRESETS[next];
     setBaseUrl((current) => (current === "" || current === from.baseUrl ? to.baseUrl : current));
     setModel((current) => (current === "" || current === from.model ? to.model : current));
+    touch("provider");
+    touch("baseUrl");
+    touch("model");
     setProvider(next);
   };
 
@@ -128,7 +150,7 @@ function SettingsView({ ctx }: { ctx: PanelContext }) {
 
       <label class="field">
         <span>Base URL</span>
-        <input type="url" value={baseUrl} spellcheck={false} onInput={(e) => setBaseUrl(e.currentTarget.value)} />
+        <input type="url" value={baseUrl} spellcheck={false} onInput={(e) => { touch("baseUrl"); setBaseUrl(e.currentTarget.value); }} />
       </label>
 
       <label class="field">
@@ -140,7 +162,7 @@ function SettingsView({ ctx }: { ctx: PanelContext }) {
             autocomplete="off"
             spellcheck={false}
             placeholder={draft?.hasKey === true ? "leave empty to keep the stored key" : "sk-…"}
-            onInput={(event) => setApiKey(event.currentTarget.value)}
+            onInput={(event) => { touch("apiKey"); setApiKey(event.currentTarget.value); }}
           />
           <button
             class="button"
@@ -164,12 +186,12 @@ function SettingsView({ ctx }: { ctx: PanelContext }) {
 
       <label class="field">
         <span>Model</span>
-        <input type="text" value={model} spellcheck={false} onInput={(e) => setModel(e.currentTarget.value)} />
+        <input type="text" value={model} spellcheck={false} onInput={(e) => { touch("model"); setModel(e.currentTarget.value); }} />
       </label>
 
       <label class="field">
         <span class="check-row">
-          <input type="checkbox" checked={sendImages} onChange={(event) => setSendImages(event.currentTarget.checked)} />
+          <input type="checkbox" checked={sendImages} onChange={(event) => { touch("sendImages"); setSendImages(event.currentTarget.checked); }} />
           <span>Send images to the model</span>
         </span>
         <small>
@@ -183,6 +205,7 @@ function SettingsView({ ctx }: { ctx: PanelContext }) {
         <select
           value={language.choice}
           onChange={(event) => {
+            touch("language");
             const choice = event.currentTarget.value;
             // The typed label survives a detour through a preset, so picking one by mistake
             // is not the same as deleting what the user wrote.
@@ -206,6 +229,7 @@ function SettingsView({ ctx }: { ctx: PanelContext }) {
             aria-label="Custom answer language"
             placeholder="Türkçe, samimi ton"
             onInput={(event) => {
+              touch("language");
               const text = event.currentTarget.value;
               setLanguage((current) => ({ choice: current.choice, text }));
             }}
@@ -222,9 +246,12 @@ function SettingsView({ ctx }: { ctx: PanelContext }) {
           class="button primary"
           {...{ [ACTION_ATTR]: "save-settings" }}
           disabled={busy}
-          onClick={() =>
-            void actions.saveSettings({ provider, baseUrl, model, apiKey, sendImages, language: languageValue })
-          }
+          onClick={() => {
+            // The stored value becomes what is on screen, so the draft this save produces is
+            // safe to adopt in full again (that is what clears the key field).
+            edited.current.clear();
+            void actions.saveSettings({ provider, baseUrl, model, apiKey, sendImages, language: languageValue });
+          }}
         >
           Save
         </button>

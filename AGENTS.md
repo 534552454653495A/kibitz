@@ -662,3 +662,34 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   context for a question about another. Clicking the ✦ of the message already answered does
   nothing at all — re-asking would bill the user twice for an answer already on screen.
   Mutation-checked: forcing the restart path fails 2 tests, ignoring the author check fails 1.
+- **2026-09-03 — Live UI verification on a hidden window, and what it cost to learn.** Driving
+  the owner's Discord with CDP mouse clicks silently stopped working: a real click produced
+  **no DOM events at all** — not even a capture-phase `pointerdown` — while a synthetic
+  `.click()` ran the full path including our handler's `preventDefault`. Cause: the window
+  reports `document.visibilityState === "hidden"` (it sits behind other windows), and Chromium
+  drops synthesized mouse input for a hidden page because the hit test happens in a compositor
+  that is not running. The same state is why `requestAnimationFrame` never fired (the injector
+  bug above). Consequences for anyone verifying live:
+  1. Hit-testing claims (is the button reachable, is something covering it) need a **visible**
+     window — that is the probe's `button-clickable` job, and its live run needs the window up.
+  2. Behaviour claims (does the setting apply, does the conversation continue) may be driven by
+     activating our own elements directly, and the report must say so.
+  3. A blind `waitFor(state === "ready")` hides all of this. Wait for "ready **or** error" and
+     print the panel's own `data-kibitz-error`; a timeout is not a diagnosis.
+  Proven this way, on live Discord with the owner's own provider: `language: "English"` stored
+  (read back through `redactSettings`), a Turkish message, and an English answer — `auto` would
+  have answered Turkish, so the setting is the only explanation. Two earlier attempts at this
+  test were vacuous (a letter-only Turkish detector called "japon pornosu gibi amk" not
+  Turkish, and a pair picked from a different author). The rule that generalises: **a test
+  whose two sides can both be produced by the old behaviour** is not a test.
+- **2026-09-03 — A late `load-settings` reply overwrote what the user had just changed.** The
+  settings view seeds from the draft and re-seeds when one ARRIVES, which is a round trip after
+  the view opens. Pick a language in that window and the reply put the stored one back, then
+  Save wrote the value the user did not choose. Found by automation hitting it in under a
+  second while proving the language setting; a human who opens Settings and immediately edits
+  hits it too.
+  → The view tracks which fields were edited and the arriving draft skips those, and the set is
+  cleared on save (after a save the stored value IS the user's choice, which is what still
+  clears the key field). Mutation-checked in both directions. The tests wait for an observable
+  consequence of the adopt before asserting: the first version asserted immediately, which
+  passed whether the effect ran or not.

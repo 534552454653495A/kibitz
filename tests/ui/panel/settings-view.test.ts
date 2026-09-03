@@ -269,3 +269,36 @@ describe("settings view", () => {
     expect(actions.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ language: AUTO_LANGUAGE }));
   });
 });
+
+// Failure mode defended, measured on live Discord (2026-09-03): the view asks the host for the
+// draft when it opens, so the reply lands a round trip later. Anything the user changed in that
+// window used to be overwritten by the reply, and Save then wrote the value they did not pick.
+//
+// Each case waits for an OBSERVABLE consequence of the adopt (an untouched field taking the
+// draft's value, the key field clearing) before asserting. Preact runs effects after the
+// render, so asserting straight away would pass whether the adopt ran or not - the first
+// version of these tests did exactly that and proved nothing.
+describe("settings view late draft", () => {
+  it("keeps a language the user picked before the draft arrived, while adopting untouched fields", async () => {
+    show({ settings: { draft: null } });
+    setValue(languageSelect(), "Türkçe", "change");
+
+    // The host answers now with the stored configuration: a different model, language auto.
+    show({ settings: { draft: { ...DRAFT, model: "claude-sonnet-4-5", language: AUTO_LANGUAGE } } });
+    await vi.waitFor(() => expect(field('input[type="text"]').value).toBe("claude-sonnet-4-5"));
+    expect(languageSelect().value).toBe("Türkçe");
+
+    act("save-settings").click();
+    expect(actions.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ language: "Türkçe" }));
+  });
+
+  it("adopts the draft again after a save, so a saved key stops lingering in the field", async () => {
+    show({ settings: { draft: { ...DRAFT, hasKey: false } } });
+    setValue(field('input[type="password"]'), "sk-typed", "input");
+    act("save-settings").click();
+
+    // The save's own fresh draft: the key is stored now, so the field must be cleared.
+    show({ settings: { draft: { ...DRAFT, hasKey: true } } });
+    await vi.waitFor(() => expect(field('input[type="password"]').value).toBe(""));
+  });
+});
