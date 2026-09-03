@@ -23,23 +23,49 @@ export interface AttachOptions {
 
 /**
  * A page binding can only be added once per Page; a second `exposeFunction` with the same
- * name rejects. Tracking by Page (not by URL) survives navigations, which keep the Page.
+ * name rejects with "already exposed". Tracking by Page (not by URL) survives navigations,
+ * which keep the Page.
  *
- * The value is the id of the init script so a rebuilt bundle can replace the old one, and
+ * `attached` holds the id of the init script so a rebuilt bundle can replace the old one, and
  * `PENDING` is written **synchronously**, before the first await: `companion.ts` listens to
  * both `targetcreated` and `targetchanged`, which fire for the same page, so an id-only map
- * would let two overlapping calls past the guard and the second `exposeFunction` would
- * reject with "already exposed".
+ * would let two overlapping calls past the guard and the second `exposeFunction` would reject.
  */
 const PENDING = "";
 const attached = new Map<Page, string>();
 
+/**
+ * The handler the exposed binding forwards to, per page. The binding is installed once and
+ * then routes through this map, which is what makes a retry possible: `exposeFunction` cannot
+ * be undone, so an attach that failed *after* installing it (a target that died between the
+ * two CDP calls) used to release its claim and promise a retry that could only ever reject
+ * with "already exposed". Now the retry re-registers the bundle and re-points the handler.
+ */
+const handlers = new WeakMap<Page, (json: string) => Promise<string>>();
+
+/**
+ * Pages whose binding is installed. Separate from `handlers` because the two failures need
+ * opposite treatment: if `exposeFunction` itself failed, the retry MUST call it again, and if
+ * it succeeded and a later CDP call failed, the retry MUST NOT.
+ */
+const bound = new WeakSet<Page>();
+
 export async function attachKibitz(page: Page, options: AttachOptions): Promise<void> {
   if (attached.has(page)) return;
   attached.set(page, PENDING);
-  page.once("close", () => attached.delete(page));
+  page.once("close", () => {
+    attached.delete(page);
+    handlers.delete(page);
+  });
   try {
-    await page.exposeFunction(DESKTOP_CALL_BINDING, options.onRequest);
+    // The exposed closure reads the map on every call, so the newest handler always answers.
+    handlers.set(page, options.onRequest);
+    if (!bound.has(page)) {
+      await page.exposeFunction(DESKTOP_CALL_BINDING, (json: string) =>
+        handlers.get(page)?.(json) ?? Promise.reject(new Error("Kibitz is detached from this window")),
+      );
+      bound.add(page);
+    }
     const script = await page.evaluateOnNewDocument(options.bundle);
     attached.set(page, script.identifier);
     if (page.url() !== "about:blank") await page.evaluate(options.bundle);

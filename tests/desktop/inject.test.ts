@@ -23,22 +23,30 @@ function fakePage(): {
   scripts: Map<string, string>;
   exposeCalls: number;
   releaseExpose: () => void;
+  callBinding: (json: string) => Promise<string>;
 } {
   const scripts = new Map<string, string>();
   const exposed = new Set<string>();
+  let installed: ((json: string) => Promise<string>) | null = null;
   let nextId = 1;
   const gate = Promise.withResolvers<void>();
   const state = {
     exposeCalls: 0,
     releaseExpose: gate.resolve,
+    /** Calls the page binding the way the renderer does, to see which handler answers. */
+    callBinding: async (json: string): Promise<string> => {
+      if (installed === null) throw new Error("no binding installed");
+      return await installed(json);
+    },
     scripts,
     page: {
       url: () => "https://discord.com/channels/@me",
       once: () => undefined,
-      exposeFunction: async (name: string) => {
+      exposeFunction: async (name: string, fn: (json: string) => Promise<string>) => {
         state.exposeCalls++;
         if (exposed.has(name)) throw new Error(`Failed to add page binding with name ${name}: already exposed`);
         exposed.add(name);
+        installed = fn;
         await gate.promise;
       },
       evaluateOnNewDocument: async (source: string) => {
@@ -66,6 +74,25 @@ describe("attachKibitz", () => {
     await expect(Promise.all([first, second])).resolves.toBeDefined();
     expect(fake.exposeCalls).toBe(1);
     expect([...fake.scripts.values()]).toEqual(["//v1"]);
+  });
+
+  it("retries after a failure that happened AFTER the binding installed, without re-exposing", async () => {
+    // Real Puppeteer cannot undo `exposeFunction`, so a retry that calls it again can only
+    // reject with "already exposed". The window that died between the two CDP calls used to
+    // be unrecoverable for exactly that reason.
+    const fake = fakePage();
+    fake.releaseExpose();
+    vi.spyOn(fake.page, "evaluateOnNewDocument").mockRejectedValueOnce(new Error("Target closed"));
+    const first = vi.fn();
+    await expect(attachKibitz(fake.page, { bundle: "//v1", onRequest: first })).rejects.toThrow("Target closed");
+
+    const second = vi.fn().mockResolvedValue('{"ok":true}');
+    await expect(attachKibitz(fake.page, { bundle: "//v1", onRequest: second })).resolves.toBeUndefined();
+    expect(fake.exposeCalls).toBe(1);
+    // The binding routes to the handler from the attach that actually completed.
+    await fake.callBinding('{"type":"ping"}');
+    expect(second).toHaveBeenCalledWith('{"type":"ping"}');
+    expect(first).not.toHaveBeenCalled();
   });
 
   it("releases the claim when the binding fails, so the next target event can retry", async () => {

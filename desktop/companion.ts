@@ -78,7 +78,13 @@ async function findMainPage(browser: Browser): Promise<Page> {
 }
 
 export async function runCompanion(opts: CompanionOptions): Promise<void> {
-  const { bundle } = opts;
+  /**
+   * The bundle currently armed, not the one this process started with. A popout or a window
+   * re-created AFTER a rebuild goes through the same `attach`, and reading `opts.bundle`
+   * there would inject the renderer this process booted with — the exact staleness the
+   * watcher exists to end, reappearing for every new window.
+   */
+  const armed = { bundle: opts.bundle };
   const file = opts.settingsPath ?? settingsPath();
   // Preferences live beside whichever settings file is in play, so an overridden
   // `settingsPath` (tests, a second profile) keeps both halves of the state together.
@@ -103,7 +109,7 @@ export async function runCompanion(opts: CompanionOptions): Promise<void> {
       openOptions: () => console.log(setupInstructions(file)),
     });
     page.once("close", () => handler.abortAll());
-    await attachKibitz(page, { bundle, onRequest: handler.handle });
+    await attachKibitz(page, { bundle: armed.bundle, onRequest: handler.handle });
     log.info(`Kibitz attached to ${page.url()}`);
   };
 
@@ -120,7 +126,7 @@ export async function runCompanion(opts: CompanionOptions): Promise<void> {
   browser.on("targetchanged", onTarget);
 
   await attach(await findMainPage(browser));
-  const stopWatching = opts.bundlePath === undefined ? undefined : watchBundle(opts.bundlePath, pages);
+  const stopWatching = opts.bundlePath === undefined ? undefined : watchBundle(opts.bundlePath, pages, armed);
 
   const { promise, resolve } = Promise.withResolvers<void>();
   browser.once("disconnected", () => {
@@ -155,14 +161,14 @@ export async function runCompanion(opts: CompanionOptions): Promise<void> {
  * `mtimeMs === 0` is `watchFile`'s "not there": the build's `rm` fires that before the new
  * file lands, so it is a signal to wait for the next tick, never to inject.
  */
-function watchBundle(bundlePath: string, pages: ReadonlySet<Page>): () => void {
+function watchBundle(bundlePath: string, pages: ReadonlySet<Page>, armed: { bundle: string }): () => void {
   let timer: NodeJS.Timeout | undefined;
   const onChange = (current: Stats, previous: Stats): void => {
     if (current.mtimeMs === 0) return;
     if (current.mtimeMs === previous.mtimeMs && current.size === previous.size) return;
     clearTimeout(timer);
     timer = setTimeout(() => {
-      void reloadBundle(bundlePath, pages);
+      void reloadBundle(bundlePath, pages, armed);
     }, BUNDLE_DEBOUNCE_MS);
   };
   watchFile(bundlePath, { interval: BUNDLE_POLL_MS }, onChange);
@@ -195,9 +201,11 @@ async function readStableBundle(bundlePath: string): Promise<string | undefined>
   return undefined;
 }
 
-async function reloadBundle(bundlePath: string, pages: ReadonlySet<Page>): Promise<void> {
+async function reloadBundle(bundlePath: string, pages: ReadonlySet<Page>, armed: { bundle: string }): Promise<void> {
   const fresh = await readStableBundle(bundlePath);
   if (fresh === undefined) return;
+  // Windows attached from now on get this text too, not the one the process booted with.
+  armed.bundle = fresh;
   let swapped = 0;
   for (const page of pages) {
     try {

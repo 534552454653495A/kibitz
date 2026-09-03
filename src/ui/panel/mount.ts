@@ -39,7 +39,7 @@ import type { PanelActions } from "./actions";
 import { clampLayout, installLayoutController, parseLayoutState, UI_STATE_LAYOUT_KEY } from "./layout";
 import { DEFAULT_LAYOUT_STATE, type LayoutState, type Viewport } from "./layout-model";
 import panelCss from "./panel.css";
-import { INITIAL, isTextTurn, reduce, type PanelAction, type PanelModel } from "./state";
+import { admitsMessage, conversationMessages, INITIAL, isTextTurn, reduce, type PanelAction, type PanelModel } from "./state";
 
 export interface PanelHandle {
   open(ref: MessageRef): void;
@@ -256,16 +256,17 @@ export function mountPanel(adapter: PlatformAdapter, shell: Shell): PanelHandle 
   }
 
   /**
-   * A second click while a conversation is open. The message is read FIRST, because the
-   * author is the deciding fact and only the read knows it: same person (and same channel)
-   * means this message joins the conversation, anyone else means a fresh one.
+   * A second click while a conversation is open. The message is read FIRST, because whether it
+   * belongs to this conversation is decided by its author and its reply target, and only the
+   * read knows either (see `admitsMessage` for the rule and the reasoning).
    *
-   * The channel is part of the test on purpose. The same person's messages in another server
-   * are another subject, and folding them into one prompt would quietly ship one server's
-   * content as context for a question about another.
+   * The channel is checked by the caller on purpose. The same person's messages in another
+   * server are another subject, and folding them into one prompt would quietly ship one
+   * server's content as context for a question about another.
    */
-  async function continueFlow(ref: MessageRef, owner: number, authorId: string): Promise<void> {
+  async function continueFlow(ref: MessageRef, owner: number): Promise<void> {
     const settings = settingsPromise();
+    const cards = conversationMessages(model.turns);
     let message: UniversalMessage;
     try {
       message = await adapter.readMessage(ref);
@@ -278,7 +279,7 @@ export function mountPanel(adapter: PlatformAdapter, shell: Shell): PanelHandle 
       return;
     }
     if (owner !== session) return;
-    if (message.author.id !== authorId) {
+    if (!admitsMessage(cards, message)) {
       dispatch({ type: "open", ref });
       dispatch({ type: "loaded", message });
       await finishExplain(buildExplainMessages(message), settings, owner);
@@ -528,14 +529,14 @@ export function mountPanel(adapter: PlatformAdapter, shell: Shell): PanelHandle 
       // the same question would cost the user a second request for the same answer.
       if (sameMessage && model.status === "ready") return;
       // Another message while a conversation is open, in the same channel: it MIGHT belong to
-      // the same author, which only the read can tell (see continueFlow).
-      const mayContinue = model.status === "ready" && model.message !== null && model.ref?.channelId === ref.channelId;
-      const authorId = model.message?.author.id;
+      // it - by author or by reply - which only the read can tell (see continueFlow).
+      const mayContinue =
+        model.status === "ready" && model.ref?.channelId === ref.channelId && conversationMessages(model.turns).length > 0;
       session += 1;
       stopStream();
       stopScan();
-      if (mayContinue && authorId !== undefined) {
-        void continueFlow(ref, session, authorId);
+      if (mayContinue) {
+        void continueFlow(ref, session);
         return;
       }
       dispatch({ type: "open", ref });

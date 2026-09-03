@@ -309,6 +309,74 @@ describe("mountPanel same-author conversation", () => {
     expect(host().getAttribute(PANEL_MESSAGE_ATTR)).toBe("m2");
   });
 
+  // The owner's report, verbatim scenario: Yunus writes, Adem REPLIES to him, and clicking
+  // Adem's reply used to open a fresh panel - "o da aynı konu üzerine olduğu için aynı sohbete
+  // katılmalı". The counterfactual they gave is the test below it: an unrelated message from
+  // Adem still starts over.
+  it("admits another author's reply to a message already in the conversation", async () => {
+    const reply: UniversalMessage = {
+      ...message,
+      id: "m4",
+      author: { id: "u2", name: "Adem", isBot: false },
+      content: "3 yoomu",
+      replyTo: { messageId: "m1", authorName: "yunus", excerpt: "Spider man 2 Türkçe iso" },
+    };
+    const panel = mountPanel(byId(message, reply), createExtensionShell());
+    panel.open(ref);
+    await settleFirstAnswer("It says hi.");
+
+    panel.open({ ...ref, messageId: "m4" });
+    const next = await untilPort(1);
+    const request = next.sent[0];
+    if (request?.type !== "chat") throw new Error("expected a chat request");
+    expect(request.messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "user"]);
+    await vi.waitFor(() => expect(cards()).toBe(2));
+    expect(host().shadowRoot?.textContent).toContain("It says hi.");
+    expect(host().getAttribute(PANEL_MESSAGE_ATTR)).toBe("m4");
+  });
+
+  it("admits the message a card in the conversation was replying to (the mirror direction)", async () => {
+    // Open the reply first, then click the original: the user read the answer about the reply
+    // and wants the message it answered in the same thread.
+    const reply: UniversalMessage = {
+      ...message,
+      id: "m4",
+      author: { id: "u2", name: "Adem", isBot: false },
+      replyTo: { messageId: "m1", authorName: "Alice" },
+    };
+    const panel = mountPanel(byId(message, reply), createExtensionShell());
+    panel.open({ ...ref, messageId: "m4" });
+    await settleFirstAnswer("It answers Alice.");
+
+    panel.open(ref);
+    const next = await untilPort(1);
+    const request = next.sent[0];
+    if (request?.type !== "chat") throw new Error("expected a chat request");
+    expect(request.messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "user"]);
+    await vi.waitFor(() => expect(cards()).toBe(2));
+  });
+
+  it("starts over for a new author whose reply points outside the conversation", async () => {
+    const elsewhere: UniversalMessage = {
+      ...message,
+      id: "m5",
+      author: { id: "u3", name: "Cem", isBot: false },
+      content: "about something else",
+      replyTo: { messageId: "m99", authorName: "someone" },
+    };
+    const panel = mountPanel(byId(message, elsewhere), createExtensionShell());
+    panel.open(ref);
+    await settleFirstAnswer("It says hi.");
+
+    panel.open({ ...ref, messageId: "m5" });
+    const next = await untilPort(1);
+    const request = next.sent[0];
+    if (request?.type !== "chat") throw new Error("expected a chat request");
+    expect(request.messages.map((m) => m.role)).toEqual(["system", "user"]);
+    await vi.waitFor(() => expect(host().shadowRoot?.textContent).toContain("about something else"));
+    expect(cards()).toBe(1);
+  });
+
   it("starts over for a different author instead of mixing two people in one thread", async () => {
     const panel = mountPanel(byId(message, otherPerson), createExtensionShell());
     panel.open(ref);

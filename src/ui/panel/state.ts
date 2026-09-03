@@ -33,6 +33,38 @@ export function isTextTurn(turn: Turn): turn is { role: "user" | "assistant" | "
   return turn.role !== "message";
 }
 
+/** The message cards in the transcript, in the order they were asked about. */
+export function conversationMessages(turns: Turn[]): UniversalMessage[] {
+  return turns.flatMap((turn) => (turn.role === "message" ? [turn.message] : []));
+}
+
+/**
+ * Does this message belong to the conversation already on screen?
+ *
+ * Owner's rule, in their words: two messages by one person are one conversation, and a message
+ * that **replies** to one of them is the same subject too — "yunusun mesajını yanıtlayıp cevap
+ * vermiş". A message from someone new that replies to nothing we are discussing is a different
+ * subject and starts fresh, which is the same sentence read the other way.
+ *
+ * Three ways in, all cheap and all decidable from what is on screen:
+ *   - the author already speaks in this conversation (the original same-author rule; a person
+ *     who joined by replying counts, because from then on they are part of the subject);
+ *   - the message replies **into** the conversation;
+ *   - the conversation already replies **to** it — the mirror case, which happens when the
+ *     user reads an answer about a reply and then clicks the message it answered.
+ *
+ * Deliberately not included: a reply to some message by a participant that is not itself in
+ * the conversation. That is a different exchange by a familiar face, and the user still has a
+ * way to start over — closing the panel.
+ */
+export function admitsMessage(cards: readonly UniversalMessage[], candidate: UniversalMessage): boolean {
+  if (cards.length === 0) return false;
+  if (cards.some((card) => card.author.id === candidate.author.id)) return true;
+  const replyTarget = candidate.replyTo?.messageId;
+  if (replyTarget !== undefined && cards.some((card) => card.id === replyTarget)) return true;
+  return cards.some((card) => card.replyTo?.messageId === candidate.id);
+}
+
 /** Everything the in-panel settings form needs that is not the form's own field values. */
 export interface SettingsModel {
   /** What the host has stored, minus the key; null until the view asked for it. */

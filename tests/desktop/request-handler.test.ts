@@ -33,6 +33,12 @@ const SETTINGS: Settings = {
   language: AUTO_LANGUAGE,
 };
 const MESSAGES: ChatMessage[] = [{ role: "user", content: "hi" }];
+// A shape the panel really sends: the system prompt first, which is what the language
+// policy has to attach to.
+const MESSAGES_WITH_SYSTEM: ChatMessage[] = [
+  { role: "system", content: "rules" },
+  { role: "user", content: "explain" },
+];
 const WITH_IMAGE: ChatMessage[] = [
   { role: "system", content: "rules" },
   { role: "user", content: "explain", images: [{ url: "https://cdn.discordapp.test/shot.png", name: "shot.png" }] },
@@ -192,6 +198,28 @@ describe("chat", () => {
     await h.handler.handle(JSON.stringify({ type: "chat", requestId: "i2", messages: WITH_IMAGE }));
     await h.terminal("i2");
     expect(stub.received[0]).toEqual(WITH_IMAGE);
+  });
+
+  // Failure mode defended: this is the host the owner actually runs. The panel never sees
+  // `Settings`, so if the companion does not attach the instruction on the way out, the
+  // language the user picked reaches nothing and the setting is decoration.
+  it("names the configured language in the system message it hands the provider", async () => {
+    const h = harness({ ...SETTINGS, language: "Türkçe" });
+    await h.handler.handle(JSON.stringify({ type: "chat", requestId: "l1", messages: MESSAGES_WITH_SYSTEM }));
+    await h.terminal("l1");
+    const sent = stub.received[0];
+    expect(sent?.[0]?.role).toBe("system");
+    expect(sent?.[0]?.content).toContain("Türkçe");
+    // Appended, not substituted: the prompt's own rules must survive.
+    expect(sent?.[0]?.content.startsWith("rules")).toBe(true);
+    expect(sent?.slice(1)).toEqual(MESSAGES_WITH_SYSTEM.slice(1));
+  });
+
+  it("hands the conversation over untouched on auto, so the default costs no extra words", async () => {
+    const h = harness({ ...SETTINGS, language: AUTO_LANGUAGE });
+    await h.handler.handle(JSON.stringify({ type: "chat", requestId: "l2", messages: MESSAGES_WITH_SYSTEM }));
+    await h.terminal("l2");
+    expect(stub.received[0]).toEqual(MESSAGES_WITH_SYSTEM);
   });
 });
 

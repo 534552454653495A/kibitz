@@ -637,13 +637,22 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   prints "renderer bundle rebuilt — press Ctrl+R in Discord to load it".
   **The first version of that fix was a lie, and measuring it is what caught it.** "Watching
   the line appear" was mistaken for the fix working; patching `dist/` and reloading showed the
-  page still running the old bundle. Two separate causes, both now closed:
+  page still running the old bundle. **Three** causes, found one at a time, each by measuring
+  the thing actually claimed:
   1. `fs.watch(file)` on Windows caught the first `npm run build` and then went permanently
      deaf — esbuild replaces the file, so the handle watches an inode that no longer exists.
-     Now the **directory** is watched and events are filtered by basename. Proven with two
-     consecutive atomic replaces: rounds 1 and 2 both ran the new text after a reload.
-  2. A read can land mid-write and `readFile` **succeeds** on a truncated file, which would
-     inject a broken renderer. The text must now come back non-empty and the same size twice.
+  2. Watching the **directory** instead died too, for the same reason one level up:
+     `scripts/build.ts` starts with `fs.rm(dist, { recursive: true })`, so `dist/` is itself a
+     new inode after every build. The probe that "proved" the directory watch rewrote the file
+     *inside* `dist` — a write the real build never performs — so it proved nothing.
+     Now `watchFile` polls the **path**: no inode identity to lose, at the cost of one `stat`
+     per second. Proven against a real `npm run build`, the one that deletes the directory.
+  3. A read can land mid-write and `readFile` **succeeds** on a truncated file, which would
+     inject a broken renderer. The text must now come back non-empty and the same size twice,
+     and a file that is missing (the `rm` window) is retried rather than treated as a failure.
+  A fourth, found later by review: `attach` closed over the bundle this process **started**
+  with, so a popout or a re-created window got the stale renderer even while the watcher was
+  working. The armed bundle is now one mutable holder that both the watcher and `attach` read.
   Rule that generalises: **a fix whose evidence is a log line is not evidence.** The claim was
   "Ctrl+R loads the new build", so the check has to be Ctrl+R, then read what is live.
   The same trap exists for the extension with a different remedy: `chrome://extensions` → ↻
@@ -693,3 +702,18 @@ Format: `date — what happened — rule that resulted`. Append; never rewrite.
   clears the key field). Mutation-checked in both directions. The tests wait for an observable
   consequence of the adopt before asserting: the first version asserted immediately, which
   passed whether the effect ran or not.
+- **2026-09-03 — A reply belongs to the conversation it answers (owner's request).** The
+  same-author rule shipped that morning restarted the panel when the clicked message came from
+  someone else — including the commonest case in a real channel: Yunus writes, Adem **replies**
+  to him, and the answer to Adem's reply opened a cold panel that had never seen Yunus's
+  message. The owner's words: "o da aynı konu üzerine olduğu için aynı sohbete katılmalı …
+  eğer yunusun mesajını yanıtlamayıp yazsaydı onun için ayrı sohbet açılırdı."
+  → `admitsMessage` (`src/ui/panel/state.ts`) decides membership from what is on screen: the
+  author already speaks here, or the message replies **into** the conversation, or the
+  conversation already replies **to** it (the mirror case — read an answer about a reply, then
+  click the message it answered). `UniversalReply.messageId` makes all three exact id
+  comparisons, never a text or author-name guess.
+  Deliberately excluded: a participant's reply to some *other* message. It is a different
+  exchange by a familiar face, and closing the panel is the way to start over.
+  Mutation-checked: dropping reply-into fails 1 test, dropping the mirror fails 1, admitting
+  everything fails 2.
