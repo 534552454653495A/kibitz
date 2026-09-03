@@ -66,32 +66,21 @@ function parseInput(value: unknown): SettingsInputMessage | null {
 }
 
 /**
- * Every request type this build answers. Its only job is to tell two failures apart, because
- * they send the reader to opposite halves of the system: a type that is missing here means the
- * companion is older than the bundle in Discord (restart it), and a type that IS here but
- * whose payload was refused means the payload is wrong (a bug, or an older renderer sending a
- * shape this build no longer accepts). Saying "restart" for the second one is how an hour went
- * into the wrong half already (AGENTS.md 12, 2026-09-03).
+ * Why a request was refused, decided by the same switch that accepts them.
+ *
+ * One source of truth on purpose: the first version of this kept a separate set of known
+ * types beside the switch, which is a second home for one fact — add a case, forget the set,
+ * and the reply starts telling users to restart a companion that handles the type perfectly
+ * (AGENTS.md 5 and 12).
  */
-const KNOWN_TYPES: ReadonlySet<string> = new Set([
-  "settings-status",
-  "open-options",
-  "load-settings",
-  "load-ui-state",
-  "list-conversations",
-  "clear-conversations",
-  "save-settings",
-  "request-access",
-  "save-ui-state",
-  "cancel",
-  "load-conversation",
-  "delete-conversation",
-  "save-conversation",
-  "chat",
-]);
+type ParseFailure = "not-a-request" | "unknown-type" | "bad-payload";
+type ParseResult = { ok: true; request: DesktopRequest } | { ok: false; reason: ParseFailure };
 
-function parseRequest(raw: unknown): DesktopRequest | null {
-  if (!isRecord(raw)) return null;
+const BAD_PAYLOAD: ParseResult = { ok: false, reason: "bad-payload" };
+const accept = (request: DesktopRequest): ParseResult => ({ ok: true, request });
+
+function parseRequest(raw: unknown): ParseResult {
+  if (!isRecord(raw) || typeof raw.type !== "string") return { ok: false, reason: "not-a-request" };
   switch (raw.type) {
     case "settings-status":
     case "open-options":
@@ -99,33 +88,33 @@ function parseRequest(raw: unknown): DesktopRequest | null {
     case "load-ui-state":
     case "list-conversations":
     case "clear-conversations":
-      return { type: raw.type };
+      return accept({ type: raw.type });
     case "save-settings": {
       const input = parseInput(raw.input);
-      return input === null ? null : { type: "save-settings", input };
+      return input === null ? BAD_PAYLOAD : accept({ type: "save-settings", input });
     }
     case "request-access":
-      return typeof raw.origin === "string" ? { type: "request-access", origin: raw.origin } : null;
+      return typeof raw.origin === "string" ? accept({ type: "request-access", origin: raw.origin }) : BAD_PAYLOAD;
     case "save-ui-state":
-      return isRecord(raw.state) ? { type: "save-ui-state", state: raw.state } : null;
+      return isRecord(raw.state) ? accept({ type: "save-ui-state", state: raw.state }) : BAD_PAYLOAD;
     case "cancel":
-      return typeof raw.requestId === "string" ? { type: "cancel", requestId: raw.requestId } : null;
+      return typeof raw.requestId === "string" ? accept({ type: "cancel", requestId: raw.requestId }) : BAD_PAYLOAD;
     case "load-conversation":
     case "delete-conversation":
-      return typeof raw.id === "string" ? { type: raw.type, id: raw.id } : null;
+      return typeof raw.id === "string" ? accept({ type: raw.type, id: raw.id }) : BAD_PAYLOAD;
     // The record crossed the CDP binding as JSON from Discord's own realm, so it is parsed
     // with the storage validator rather than cast: whatever is accepted here is written to
     // disk and rendered back into the panel later.
     case "save-conversation": {
       const record = parseConversation(raw.record);
-      return record === null ? null : { type: "save-conversation", record };
+      return record === null ? BAD_PAYLOAD : accept({ type: "save-conversation", record });
     }
     case "chat":
       return typeof raw.requestId === "string" && Array.isArray(raw.messages)
-        ? { type: "chat", requestId: raw.requestId, messages: raw.messages as ChatRequest["messages"] }
-        : null;
+        ? accept({ type: "chat", requestId: raw.requestId, messages: raw.messages as ChatRequest["messages"] })
+        : BAD_PAYLOAD;
     default:
-      return null;
+      return { ok: false, reason: "unknown-type" };
   }
 }
 
@@ -241,28 +230,27 @@ export function createDesktopRequestHandler(deps: RequestHandlerDeps): DesktopRe
       } catch {
         return JSON.stringify({ ok: false, error: "request is not valid JSON" } satisfies DesktopReply);
       }
-      const request = parseRequest(raw);
-      if (request === null) {
-        // Three different failures, three different readers to send somewhere useful:
-        //   no type at all      → the message is not one of ours;
-        //   an unknown type     → this process is older than the bundle in Discord, and only a
-        //                         restart fixes it (the watcher re-arms the renderer, never
-        //                         this Node process);
-        //   a known type refused → the payload is wrong, and blaming the companion's age would
-        //                         point at the wrong half — which is exactly what happened
-        //                         once already (AGENTS.md 12, 2026-09-03).
-        const type = isRecord(raw) && typeof raw.type === "string" ? raw.type : null;
+      const parsed = parseRequest(raw);
+      if (!parsed.ok) {
+        // Three failures, three readers to send somewhere useful, and the reason comes from
+        // the parser rather than from a second list of types kept in sync by hand:
+        //   not-a-request → the message is not one of ours at all;
+        //   unknown-type  → this process is older than the bundle in Discord, and only a
+        //                   restart fixes it (the watcher re-arms the renderer, never Node);
+        //   bad-payload   → the type is one we handle, so blaming the companion's age would
+        //                   point at the wrong half — which happened once already (§12).
+        const type = isRecord(raw) && typeof raw.type === "string" ? raw.type : "?";
         const error =
-          type === null
+          parsed.reason === "not-a-request"
             ? "malformed request"
-            : KNOWN_TYPES.has(type)
+            : parsed.reason === "bad-payload"
               ? `"${type}" was refused: its payload is not the shape this build accepts.`
               : `this companion does not understand "${type}" — it is running older code than the Kibitz bundle in Discord. Restart it (npm run desktop).`;
         log.warn(`ignoring desktop request: ${error}`);
         return JSON.stringify({ ok: false, error } satisfies DesktopReply);
       }
       try {
-        return JSON.stringify(await dispatch(request));
+        return JSON.stringify(await dispatch(parsed.request));
       } catch (err) {
         log.error("desktop request failed", err);
         return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) } satisfies DesktopReply);

@@ -101,14 +101,14 @@ describe("attachKibitz", () => {
     // A window that dies mid-attach: the binding never installs. The trap this pins is an
     // attach that "succeeds" by skipping `exposeFunction` because some earlier bookkeeping
     // already recorded the page — the panel would then talk to a binding that is not there.
-    vi.spyOn(fake.page, "exposeFunction").mockRejectedValueOnce(new Error("Target closed"));
+    const expose = vi.spyOn(fake.page, "exposeFunction").mockRejectedValueOnce(new Error("Target closed"));
     await expect(attachKibitz(fake.page, { bundle: "//v1", onRequest: vi.fn() })).rejects.toThrow("Target closed");
 
     const handler = vi.fn().mockResolvedValue('{"ok":true}');
     await expect(attachKibitz(fake.page, { bundle: "//v1", onRequest: handler })).resolves.toBeUndefined();
-    // One counted call: the first attempt was replaced by the rejecting mock, so this count
-    // is the retry's own call reaching the fake — i.e. the binding was installed, not assumed.
-    expect(fake.exposeCalls).toBe(1);
+    // Counted on the spy, not inside the fake: the rejecting mock replaces the fake's body, so
+    // the fake's own counter never sees the first attempt.
+    expect(expose).toHaveBeenCalledTimes(2);
     expect([...fake.scripts.values()]).toEqual(["//v1"]);
     // The decisive part: a call from the page reaches the handler, which is only possible if
     // the retry installed the binding rather than assuming it was there.
