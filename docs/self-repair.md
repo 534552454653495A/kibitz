@@ -142,6 +142,44 @@ gh run download <run-id> -D evidence                     # pull a run's artefact
 Labels the pipeline creates on first use: `auto:broken-selector`, `auto:probe-session`,
 `ai-fix`, `needs-human`.
 
+## Known gaps
+
+Found in a code review on 2026-09-02 and not yet fixed. They do not stop the pipeline
+from working; they bound what it can be trusted with.
+
+- **The agent's own tests run with the automation token in the environment.** The
+  `Verify (npm run check)` step in `ai-fix.yml` keeps `GH_TOKEN` (the `AI_FIX_TOKEN`) so
+  it can label the issue on failure, and `npm run check` executes whatever test files the
+  agent wrote under `tests/adapters/`. The agent itself has no token, but code it wrote
+  does. The commit step then runs `git add -A`, after the allowlist check, so files a test
+  writes are committed too. Fix: run the check in a token-free step, label in a later
+  one, and re-run `check-allowlist.sh` after the tests.
+- **An open issue does not restart the agent.** `upsert-issue.sh` edits the existing
+  `auto:broken-selector` issue in place, which fires no `labeled` event. A second break
+  while the first issue is still open starts no round. Dispatch `ai-fix` by hand with the
+  issue number, or close the issue so the next run recreates it. The issue is also never
+  closed automatically when the probe goes green.
+- **Session failures are recognised only by a navigation.** `list-root` files
+  `failureKind: session` when the page leaves the channel URL. A login challenge or
+  verification gate rendered at the same URL times out as a `contract` failure and starts
+  the agent on evidence with no message list.
+- **The token seeder runs in every frame.** `installDiscordToken` uses
+  `evaluateOnNewDocument`, which runs in every frame of every origin the page embeds, so
+  the throwaway token is written to third-party iframes' storage during a run. One more
+  reason the account must be disposable.
+- **The probe checks only the required half of the contract.** `fiber-read` validates
+  `UniversalMessage` shape; drift in replies, attachments, embeds, mentions or reactions
+  stays green. `MESSAGE_CONTENT` and `MESSAGE_ARTICLE` are never probed, and the adapter
+  falls back silently when the content anchor is missing, so a renamed content id leaves
+  the probe green while buttons move.
+- **The global cap can misfile a slow run.** The check budgets sum to 320 s and
+  navigation adds 60 s; the global timeout is 360 s. A run that is slow but progressing
+  can trip it and be reported as `setup`, which files `auto:probe-session`.
+- **`npm run probe:selftest` is not part of the fix loop.** The workflow verifies the
+  agent's tree with `npm run check` only; AGENTS.md §10 asks for the self-test on selector
+  changes. It runs on the PR through `ci.yml`, so a broken fixture still turns the PR red,
+  but only after the round has been spent.
+
 ## Changing the workflows
 
 Actions' expression validator only runs on GitHub. A workflow file that parses as YAML

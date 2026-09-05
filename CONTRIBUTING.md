@@ -52,7 +52,9 @@ against an old contract tests nothing. With a throwaway Discord account, also ru
 
 **Conventions.** TypeScript strict, no `any` (use `unknown` and narrow),
 `noUncheckedIndexedAccess` is on. Extensionless imports, `import type` for types. `.md`
-and `.css` import as strings. Logging goes through `log` from `src/shared/log.ts`. Bridge
+and `.css` import as strings in the bundle; under Vitest only `.md` does today (a `.css`
+import is an empty string there, despite the comment in `vitest.config.ts`). Logging goes
+through `log` from `src/shared/log.ts`. Bridge
 payloads are JSON strings. Every wait that involves the page has a timeout. Comments
 record decisions, not restatements. Full list: [AGENTS.md §9](AGENTS.md#9-code-conventions).
 

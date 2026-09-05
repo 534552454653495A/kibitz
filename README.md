@@ -28,7 +28,7 @@ what was asked, what was decided and what is still open.
 **Contents:** [Know before you install](#know-before-you-install) ·
 [Quick start](#quick-start) · [Providers](#providers) · [Using Kibitz](#using-kibitz) ·
 [Troubleshooting](#troubleshooting) · [Where your data goes](#where-your-data-goes) ·
-[Project status](#project-status) · [How it works](#how-it-works) ·
+[Project status](#project-status) · [Known issues](#known-issues) · [How it works](#how-it-works) ·
 [When Discord changes](#when-discord-changes) · [Development](#development) ·
 [License](#license)
 
@@ -92,7 +92,9 @@ change them to point at any compatible server.
   `https://` origins and `http://localhost` / `http://127.0.0.1` can be granted.
 - If you decline the prompt, the settings are still saved, but every request fails with
   *no permission* until you press **Save** again and allow it. An origin granted for an
-  earlier base URL stays granted until you revoke it in `chrome://extensions`.
+  earlier base URL stays granted until you revoke it in `chrome://extensions`. A server on
+  another machine over plain `http://` (a LAN address) cannot be granted at all; Save
+  fails.
 
 ## Using Kibitz
 
@@ -100,7 +102,7 @@ change them to point at any compatible server.
 | --- | --- |
 | Explain a message | Click its ✦. The panel opens on the right, shows the message (author, time, text, reply target, attachment and embed counts) and streams an explanation, in the language of the message unless you ask otherwise. |
 | Ask a follow-up | Type in the box at the bottom. **Enter** sends, **Shift+Enter** inserts a newline. The message stays in context. |
-| Summarise the conversation | **Scan related messages**. Kibitz scrolls the channel back in viewport-sized steps, reads every message it passes, stops after **200 messages** or **45 seconds** (or at the top of the history), scrolls the message you asked about back into view and asks the AI for a synthesis. "(limit reached)" after the count means a cap was hit. |
+| Summarise the conversation | **Scan related messages**. Kibitz scrolls the channel back in viewport-sized steps, reads every message it passes, stops after **200 messages** or **45 seconds** (or at the top of the history), scrolls your message back into view and asks the AI for a synthesis. "(limit reached)" after the count means a cap was hit. |
 | Stop an answer | **Stop** appears while streaming. What has arrived is kept. The input box and the scan button are disabled while an answer streams. |
 | Close | **×** or **Esc**. |
 | Switch message | Click another ✦; the panel resets for that message. |
@@ -156,6 +158,32 @@ The DOM selectors, the React prop names, the fiber walk limits and the raw Disco
 names are verified only by the token-backed live probe. Expect breakage when Discord
 ships a redesign; that is what the probe is for. Kibitz is a hobby project with no
 commercial goal.
+
+## Known issues
+
+Found in a code review on 2026-09-02 and not yet fixed. Each one is a small change; the
+file is named so you can find it.
+
+- **Scan can leave you in older history.** After a long scan Discord has usually dropped
+  your message from the DOM, and the fallback in `src/adapters/discord/scroller.ts`
+  restores a scroll offset that no longer means the same place. Scroll down to get back.
+- **Scan fails in short channels.** A channel that does not overflow its viewport has no
+  scrollable ancestor, so the scan reports `ContractError: dom.scroller` instead of
+  summarising what is visible.
+- **Stop before the first token, then follow up: Anthropic rejects the request.** The
+  stopped answer is stored as an empty assistant turn, which the Messages API refuses.
+  Close the panel and open it again.
+- **An error inside an OpenAI-compatible stream shows as an empty answer.** Servers that
+  report a mid-stream error as a JSON event (rate limits, overloaded) are read as "no
+  text" and the panel says nothing. Check the console for the body.
+- **After reloading or updating the extension, open Discord tabs say *Kibitz needs an
+  API key*.** The old content script lost its connection to the extension. Reload the
+  tab.
+- **Forwarded messages read as empty replies.** A forward carries a message reference
+  without a resolvable target, so the card shows "reply to unknown".
+- **Message text goes into the prompt unescaped.** A message written to look like a
+  system notice, a reply line or a second anchor can steer the explanation. Treat
+  explanations as a reading aid, not as ground truth.
 
 ## How it works
 
