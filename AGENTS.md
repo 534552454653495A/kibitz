@@ -54,6 +54,8 @@ probe/                  run.ts, checks.ts, report.ts, outline.ts, page-helper.ts
 tests/                  vitest; mirrors src/ layout
 .github/workflows/      ci.yml, canary-probe.yml, ai-fix.yml, ai-review.yml
 .github/ai/             prompts, output schemas and the path allowlist for the agents
+CONTRIBUTING.md         The short path through this file for a first PR
+docs/self-repair.md     Operating the probe/agent pipeline: secrets, the account, reading a red run
 ```
 
 ---
